@@ -98,11 +98,6 @@
       font-size: 1.45rem;
     }
 
-    .place-card h3 {
-      margin: 1.25rem 0 0.6rem;
-      font-size: 1.05rem;
-    }
-
     .hours-row,
     .price-row,
     .exception-row,
@@ -143,9 +138,27 @@
       background: #fff6d8;
     }
 
-    .special-admission strong {
+    .special-admission > strong {
       display: block;
-      margin-bottom: 0.3rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .special-rule {
+      margin-top: 0.9rem;
+    }
+
+    .special-rule-title {
+      font-weight: 700;
+    }
+
+    .special-rule-detail {
+      margin-top: 0.25rem;
+    }
+
+    .proof-note {
+      margin-top: 0.25rem;
+      font-style: italic;
+      color: #626962;
     }
 
     .future-prices {
@@ -737,33 +750,180 @@ function renderAdmission(
       const item =
         document.createElement("div");
 
-      item.style.marginTop = "0.7rem";
+      item.className =
+        "special-rule";
+
 
       const title =
         document.createElement("div");
 
+      title.className =
+        "special-rule-title";
+
       title.textContent =
         `${rule.rule_name_english}: ${formatMoney(rule)}`;
-
-      title.style.fontWeight = "700";
 
       item.appendChild(title);
 
 
-      rule.time_rules.forEach(
-        timeRule => {
+      if (Array.isArray(rule.conditions)) {
 
-          const note =
-            document.createElement("div");
+        rule.conditions.forEach(
+          condition => {
 
-          note.textContent =
-            timeRule.notes_english || "";
+            const detail =
+              document.createElement("div");
 
-          item.appendChild(note);
-        }
-      );
+            detail.className =
+              "special-rule-detail";
+
+
+            if (
+              condition.condition_type ===
+                "resident_country" &&
+              condition.operator ===
+                "equals" &&
+              condition.value_text ===
+                "PT"
+            ) {
+              detail.textContent =
+                "For residents of Portugal.";
+            }
+
+            else if (
+              condition.condition_type ===
+                "resident_country" &&
+              condition.operator ===
+                "not_equals" &&
+              condition.value_text ===
+                "PT"
+            ) {
+              detail.textContent =
+                "For visitors who are not residents of Portugal.";
+            }
+
+            else if (
+              condition.condition_type ===
+                "age_min"
+            ) {
+              detail.textContent =
+                `Minimum age: ${condition.value_number}.`;
+            }
+
+            else if (
+              condition.condition_type ===
+                "age_max"
+            ) {
+              detail.textContent =
+                `Maximum age: ${condition.value_number}.`;
+            }
+
+            else {
+              detail.textContent =
+                condition.notes_english || "";
+            }
+
+
+            if (detail.textContent) {
+              item.appendChild(detail);
+            }
+
+          }
+        );
+      }
+
+
+      if (Array.isArray(rule.time_rules)) {
+
+        rule.time_rules.forEach(
+          timeRule => {
+
+            const detail =
+              document.createElement("div");
+
+            detail.className =
+              "special-rule-detail";
+
+            const pieces = [];
+
+
+            if (
+              timeRule.week_of_month &&
+              timeRule.day_of_week !== null &&
+              timeRule.day_of_week !== undefined
+            ) {
+
+              const ordinal = {
+                1: "first",
+                2: "second",
+                3: "third",
+                4: "fourth",
+                5: "fifth"
+              };
+
+              pieces.push(
+                `${ordinal[timeRule.week_of_month]} ${dayNames[timeRule.day_of_week]} of each month`
+              );
+            }
+
+            else if (
+              timeRule.day_of_week !== null &&
+              timeRule.day_of_week !== undefined
+            ) {
+              pieces.push(
+                dayNames[timeRule.day_of_week]
+              );
+            }
+
+
+            if (
+              timeRule.starts_at &&
+              timeRule.ends_at
+            ) {
+              pieces.push(
+                `${timeRule.starts_at}–${timeRule.ends_at}`
+              );
+            }
+
+
+            if (pieces.length) {
+              detail.textContent =
+                pieces.join(" · ");
+            }
+
+            else {
+              detail.textContent =
+                timeRule.notes_english || "";
+            }
+
+
+            if (detail.textContent) {
+              item.appendChild(detail);
+            }
+
+          }
+        );
+      }
+
+
+      if (rule.proof_required) {
+
+        const proof =
+          document.createElement("div");
+
+        proof.className =
+          "proof-note";
+
+        proof.textContent =
+          rule.proof_description_english ||
+          "Proof of eligibility may be required.";
+
+        item.appendChild(proof);
+      }
+
 
       specialContainer.appendChild(item);
+
     });
   }
 
