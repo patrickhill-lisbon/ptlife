@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>Place | PTLife</title>
+
+  <link rel="stylesheet" href="/style.css">
+
+  <style>
+    .place-page {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .place-header {
+      margin-bottom: 32px;
+    }
+
+    .place-type {
+      text-transform: uppercase;
+      font-size: 0.85rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      opacity: 0.7;
+    }
+
+    .place-header h1 {
+      margin-bottom: 8px;
+    }
+
+    .place-location {
+      font-size: 1.05rem;
+      opacity: 0.8;
+    }
+
+    .place-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+    }
+
+    .place-card {
+      border: 1px solid #ddd;
+      border-radius: 14px;
+      padding: 20px;
+      min-width: 0;
+    }
+
+    .place-card h2 {
+      margin-top: 0;
+    }
+
+    .hours-row,
+    .price-row,
+    .exception-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+    }
+
+    .hours-row:last-child,
+    .price-row:last-child,
+    .exception-row:last-child {
+      border-bottom: 0;
+    }
+
+    .free {
+      font-weight: 700;
+    }
+
+    .special-note {
+      margin-top: 8px;
+      font-size: 0.95rem;
+    }
+
+    .official-link {
+      display: inline-block;
+      margin-top: 20px;
+    }
+
+    .error-message {
+      padding: 30px;
+      text-align: center;
+    }
+
+    @media (max-width: 700px) {
+      .place-page {
+        padding: 16px;
+      }
+
+      .place-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hours-row,
+      .price-row,
+      .exception-row {
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <main class="place-page">
+
+    <div id="loading">
+      Loading…
+    </div>
+
+    <div id="place-content" hidden>
+
+      <header class="place-header">
+        <div id="place-type" class="place-type"></div>
+
+        <h1 id="place-name"></h1>
+
+        <div id="place-location" class="place-location"></div>
+
+        <p id="place-description"></p>
+      </header>
+
+      <div class="place-grid">
+
+        <section class="place-card">
+          <h2>Opening hours</h2>
+          <div id="opening-hours"></div>
+        </section>
+
+        <section class="place-card">
+          <h2>Admission</h2>
+          <div id="admission"></div>
+        </section>
+
+        <section class="place-card">
+          <h2>Special hours & closures</h2>
+          <div id="exceptions"></div>
+        </section>
+
+        <section class="place-card">
+          <h2>Visit</h2>
+          <div id="address"></div>
+
+          <a
+            id="official-website"
+            class="official-link"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Official website
+          </a>
+        </section>
+
+      </div>
+
+    </div>
+
+    <div id="error" class="error-message" hidden>
+      We couldn't find this place.
+    </div>
+
+  </main>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+
+const slug = params.get("slug") || "maat-lisbon";
+
+const dayNames = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday"
+];
+
+function escapeText(value) {
+  return value == null ? "" : String(value);
+}
+
+function formatPrice(rule) {
+  if (rule.pricing_type === "free" || rule.price_eur === 0) {
+    return "Free";
+  }
+
+  if (rule.price_eur == null) {
+    return "See details";
+  }
+
+  return new Intl.NumberFormat("en-IE", {
+    style: "currency",
+    currency: rule.currency || "EUR"
+  }).format(rule.price_eur);
+}
+
+function currentRule(rule) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (rule.valid_from && today < rule.valid_from) {
+    return false;
+  }
+
+  if (rule.valid_until && today > rule.valid_until) {
+    return false;
+  }
+
+  return true;
+}
+
+async function loadPlace() {
+  try {
+
+    const response = await fetch(
+      `/api/place/${encodeURIComponent(slug)}`
+    );
+
+    if (!response.ok) {
+      throw new Error("Place not found");
+    }
+
+    const data = await response.json();
+
+    const english =
+      data.translations.find(
+        item => item.language_code === "en"
+      ) || data.translations[0];
+
+    document.title =
+      `${english?.display_name || data.place.official_name} | PTLife`;
+
+    document.getElementById("place-type").textContent =
+      data.place.place_type;
+
+    document.getElementById("place-name").textContent =
+      english?.display_name || data.place.official_name;
+
+    document.getElementById("place-location").textContent =
+      [
+        data.place.neighborhood,
+        data.place.city
+      ]
+      .filter(Boolean)
+      .join(", ");
+
+    document.getElementById("place-description").textContent =
+      english?.short_description || "";
+
+    const hoursContainer =
+      document.getElementById("opening-hours");
+
+    data.opening_hours.forEach(hours => {
+
+      const row = document.createElement("div");
+      row.className = "hours-row";
+
+      const day = document.createElement("span");
+      day.textContent = dayNames[hours.day_of_week];
+
+      const time = document.createElement("span");
+
+      if (hours.is_closed) {
+        time.textContent = "Closed";
+      } else {
+        time.textContent =
+          `${hours.opens_at}–${hours.closes_at}`;
+      }
+
+      row.append(day, time);
+      hoursContainer.appendChild(row);
+    });
+
+    const admissionContainer =
+      document.getElementById("admission");
+
+    data.admission
+      .filter(currentRule)
+      .forEach(rule => {
+
+        const row = document.createElement("div");
+        row.className = "price-row";
+
+        const name = document.createElement("span");
+        name.textContent = escapeText(rule.rule_name_english);
+
+        const price = document.createElement("span");
+        price.textContent = formatPrice(rule);
+
+        if (rule.price_eur === 0) {
+          price.className = "free";
+        }
+
+        row.append(name, price);
+        admissionContainer.appendChild(row);
+
+        if (rule.time_rules?.length) {
+
+          rule.time_rules.forEach(timeRule => {
+
+            const note = document.createElement("div");
+            note.className = "special-note";
+
+            note.textContent =
+              timeRule.notes_english || "";
+
+            admissionContainer.appendChild(note);
+          });
+        }
+      });
+
+    const exceptionContainer =
+      document.getElementById("exceptions");
+
+    data.schedule_exceptions.forEach(exception => {
+
+      const row = document.createElement("div");
+      row.className = "exception-row";
+
+      const date = document.createElement("span");
+
+      date.textContent =
+        new Date(
+          `${exception.exception_date}T12:00:00`
+        ).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+          year: "numeric"
+        });
+
+      const note = document.createElement("span");
+      note.textContent =
+        exception.note_english || exception.exception_type;
+
+      row.append(date, note);
+      exceptionContainer.appendChild(row);
+    });
+
+    document.getElementById("address").textContent =
+      [
+        data.place.address,
+        data.place.postal_code,
+        data.place.city
+      ]
+      .filter(Boolean)
+      .join(", ");
+
+    const officialWebsite =
+      document.getElementById("official-website");
+
+    officialWebsite.href =
+      data.place.official_website;
+
+    document.getElementById("loading").hidden = true;
+    document.getElementById("place-content").hidden = false;
+
+  } catch (error) {
+
+    document.getElementById("loading").hidden = true;
+    document.getElementById("error").hidden = false;
+
+  }
+}
+
+loadPlace();
+</script>
+
+</body>
+</html>
