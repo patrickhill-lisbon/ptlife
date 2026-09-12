@@ -1,44 +1,506 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PTLife — What's Happening in Portugal</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>PTLife — Discover Portugal</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f7f6f2;
+  color: #202020;
+}
+
+header {
+  background: white;
+  border-bottom: 1px solid #ddd;
+}
+
+.topbar {
+  max-width: 1180px;
+  margin: auto;
+  padding: 22px 25px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo {
+  font-size: 32px;
+  font-weight: 800;
+}
+
+.logo span {
+  color: #177245;
+}
+
+.location {
+  font-weight: bold;
+}
+
+.hero {
+  max-width: 1180px;
+  margin: auto;
+  padding: 55px 25px 35px;
+}
+
+.hero h1 {
+  font-size: 46px;
+  margin: 0 0 12px;
+}
+
+.hero p {
+  font-size: 21px;
+  color: #555;
+  margin: 0;
+}
+
+nav {
+  max-width: 1180px;
+  margin: auto;
+  padding: 0 25px 25px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+nav button {
+  background: white;
+  border: 1px solid #ccc;
+  padding: 10px 18px;
+  border-radius: 22px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+nav button:first-child {
+  background: #202020;
+  color: white;
+}
+
+main {
+  max-width: 1180px;
+  margin: auto;
+  padding: 10px 25px 70px;
+}
+
+section {
+  margin-top: 45px;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  margin-bottom: 18px;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.section-heading p {
+  margin: 5px 0 0;
+  color: #666;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.card {
+  background: white;
+  border-radius: 12px;
+  padding: 22px;
+  border: 1px solid #e3e3e3;
+}
+
+.card h3 {
+  margin: 8px 0 10px;
+  font-size: 21px;
+}
+
+.card p {
+  line-height: 1.45;
+  color: #555;
+}
+
+.date {
+  font-size: 14px;
+  font-weight: bold;
+  color: #555;
+}
+
+.action {
+  margin-top: 14px;
+  background: #fff4cc;
+  padding: 10px;
+  border-radius: 7px;
+  font-weight: bold;
+}
+
+.status {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 9px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: bold;
+  background: #e9e9e9;
+}
+
+.plan {
+  background: #dceee5;
+}
+
+.sold {
+  background: #f5dddd;
+}
+
+.free {
+  background: #dfeee3;
+}
+
+.demo {
+  background: #fff3cd;
+  border: 1px solid #eed68a;
+  padding: 13px 16px;
+  border-radius: 8px;
+  margin: 25px 0;
+  font-size: 14px;
+}
+
+.categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.category {
+  background: white;
+  border: 1px solid #ddd;
+  padding: 12px 17px;
+  border-radius: 7px;
+}
+
+footer {
+  background: #202020;
+  color: white;
+  padding: 40px 25px;
+}
+
+.footer-inner {
+  max-width: 1180px;
+  margin: auto;
+}
+
+@media (max-width: 800px) {
+
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
+  .hero h1 {
+    font-size: 36px;
+  }
+
+  .topbar {
+    padding: 18px;
+  }
+
+  .hero {
+    padding: 35px 18px 25px;
+  }
+
+  nav,
+  main {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+</style>
 </head>
 
 <body>
-  <header>
-    <h1>PTLife</h1>
-    <p>Discover what's happening around you.</p>
-  </header>
 
-  <main>
-    <h2>Lisbon</h2>
-    <p>
-      Discover concerts, exhibitions, films, theatre, talks, walks,
-      hikes, festivals, dance, food, tours and social events around Lisbon.
-    </p>
+<header>
 
-    <h2>Explore</h2>
+<div class="topbar">
+  <div class="logo"><span>PT</span>Life</div>
+  <div class="location">Lisbon ▾</div>
+</div>
 
-    <ul>
-      <li>Today</li>
-      <li>This Week</li>
-      <li>Music</li>
-      <li>Art & Museums</li>
-      <li>Film</li>
-      <li>Theatre & Performance</li>
-      <li>Dance</li>
-      <li>Outdoors & Hiking</li>
-      <li>Talks & Learning</li>
-      <li>Food & Wine</li>
-      <li>Social & Community</li>
-      <li>Tours & Experiences</li>
-    </ul>
-  </main>
+<div class="hero">
+  <h1>What's happening in Lisbon?</h1>
+  <p>What to do. What to discover. What not to miss.</p>
+</div>
 
-  <footer>
-    <p>PTLife — Find your Portugal.</p>
-  </footer>
+<nav>
+  <button>Today</button>
+  <button>Tomorrow</button>
+  <button>This Weekend</button>
+  <button>This Week</button>
+  <button>Plan Ahead</button>
+</nav>
+
+</header>
+
+<main>
+
+<div class="demo">
+<strong>PTLife prototype:</strong>
+The listings below are demonstration events used to develop the site.
+</div>
+
+
+<section>
+
+<div class="section-heading">
+  <div>
+    <h2>🔔 Plan Ahead</h2>
+    <p>Things you need to know about before they happen.</p>
+  </div>
+</div>
+
+<div class="cards">
+
+<div class="card">
+  <div class="date">DEC 31 · DEMO EVENT</div>
+
+  <h3>Sting — New Year's Eve</h3>
+
+  <p>
+  MEO Arena · Lisbon<br>
+  Major New Year's Eve concert.
+  </p>
+
+  <div class="action">
+  Tickets on sale Oct 1 · 10:00
+  </div>
+
+  <span class="status plan">PLAN AHEAD</span>
+</div>
+
+
+<div class="card">
+  <div class="date">NOV 7–28 · DEMO EVENT</div>
+
+  <h3>Introduction to Portuguese Pottery</h3>
+
+  <p>
+  Lisbon · Four-week workshop<br>
+  Limited to 12 participants.
+  </p>
+
+  <div class="action">
+  Registration opens Sept 20
+  </div>
+
+  <span class="status plan">REGISTRATION SOON</span>
+</div>
+
+
+<div class="card">
+  <div class="date">JAN 15 · DEMO EVENT</div>
+
+  <h3>Lisbon Winter Jazz Festival</h3>
+
+  <p>
+  Multiple venues · Lisbon<br>
+  Festival passes and individual concerts.
+  </p>
+
+  <div class="action">
+  Early-bird pricing ends Oct 15
+  </div>
+
+  <span class="status plan">EARLY BIRD</span>
+</div>
+
+</div>
+
+</section>
+
+
+
+<section>
+
+<div class="section-heading">
+  <div>
+    <h2>Today in Lisbon</h2>
+    <p>Ideas for getting out today.</p>
+  </div>
+</div>
+
+<div class="cards">
+
+<div class="card">
+
+  <div class="date">TODAY · 18:00</div>
+
+  <h3>Gallery Opening in Chiado</h3>
+
+  <p>
+  Contemporary Portuguese artists with an opening reception.
+  </p>
+
+  <span class="status free">FREE</span>
+
+</div>
+
+
+<div class="card">
+
+  <div class="date">TODAY · 20:30</div>
+
+  <h3>Outdoor Film Night</h3>
+
+  <p>
+  Portuguese and international cinema under the stars.
+  </p>
+
+  <span class="status">AVAILABLE</span>
+
+</div>
+
+
+<div class="card">
+
+  <div class="date">TODAY · 21:00</div>
+
+  <h3>Live Fado Performance</h3>
+
+  <p>
+  Traditional Lisbon music in Alfama.
+  </p>
+
+  <span class="status sold">SOLD OUT</span>
+
+</div>
+
+</div>
+
+</section>
+
+
+
+<section>
+
+<div class="section-heading">
+  <div>
+    <h2>This Weekend</h2>
+    <p>A few ideas worth leaving the house for.</p>
+  </div>
+</div>
+
+<div class="cards">
+
+<div class="card">
+
+  <div class="date">SATURDAY · 09:30</div>
+
+  <h3>Sintra Coastal Hike</h3>
+
+  <p>
+  Guided hike through Sintra-Cascais Natural Park.
+  </p>
+
+  <span class="status">8 PLACES LEFT</span>
+
+</div>
+
+
+<div class="card">
+
+  <div class="date">SATURDAY · 17:00</div>
+
+  <h3>Lisbon Wine Walk</h3>
+
+  <p>
+  Small-group tasting through historic Lisbon neighborhoods.
+  </p>
+
+  <span class="status">AVAILABLE</span>
+
+</div>
+
+
+<div class="card">
+
+  <div class="date">SUNDAY · 11:00</div>
+
+  <h3>Museum Sunday</h3>
+
+  <p>
+  Explore a featured Lisbon museum exhibition.
+  </p>
+
+  <span class="status free">FREE</span>
+
+</div>
+
+</div>
+
+</section>
+
+
+
+<section>
+
+<div class="section-heading">
+  <div>
+    <h2>Explore Lisbon</h2>
+    <p>Find something that interests you.</p>
+  </div>
+</div>
+
+<div class="categories">
+
+<div class="category">🎵 Music</div>
+<div class="category">🎨 Art & Museums</div>
+<div class="category">🎬 Film</div>
+<div class="category">🎭 Theatre</div>
+<div class="category">💃 Dance</div>
+<div class="category">🥾 Outdoors & Hiking</div>
+<div class="category">💬 Talks & Learning</div>
+<div class="category">🍷 Food & Wine</div>
+<div class="category">👥 Social & Community</div>
+<div class="category">🏛 Tours & History</div>
+<div class="category">🧑‍🎨 Classes & Workshops</div>
+
+</div>
+
+</section>
+
+</main>
+
+
+<footer>
+
+<div class="footer-inner">
+
+<h2>PTLife</h2>
+
+<p>
+Discover what's happening around you — and what you need
+to plan for before it happens.
+</p>
+
+<p>Lisbon · Portugal</p>
+
+</div>
+
+</footer>
+
 </body>
 </html>
