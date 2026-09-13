@@ -239,6 +239,14 @@
       font-weight: 700;
     }
 
+    .info-disclaimer {
+      margin-top: 1.25rem;
+    }
+
+    .info-disclaimer p:last-child {
+      margin-bottom: 0;
+    }
+
     .error-message {
       padding: 3rem 1rem;
       text-align: center;
@@ -343,7 +351,11 @@
           ></div>
         </section>
 
-        <section class="place-card">
+        <section
+          class="place-card"
+          id="exceptions-section"
+          hidden
+        >
           <h2>Special hours & closures</h2>
           <div id="exceptions"></div>
         </section>
@@ -374,6 +386,25 @@
 
       </div>
 
+      <section class="place-card info-disclaimer">
+        <h2>Information & sources</h2>
+
+        <p>
+          PTLife compiles information from official and other primary and
+          secondary sources. While we aim to provide accurate and useful
+          information, details may change without notice and may contain
+          errors or omissions.
+        </p>
+
+        <p>
+          PTLife does not guarantee the accuracy, completeness, or current
+          validity of the information presented. Please verify important
+          details, including opening hours, prices, eligibility requirements,
+          event dates and availability, with the venue or organizer before
+          making plans.
+        </p>
+      </section>
+
     </div>
 
     <div
@@ -383,24 +414,7 @@
     >
       We couldn't find this place.
     </div>
-<section class="place-card" style="margin-top: 1.25rem;">
-  <h2>Information & sources</h2>
 
-  <p>
-    PTLife compiles information from official and other primary and
-    secondary sources. While we aim to provide accurate and useful
-    information, details may change without notice and may contain
-    errors or omissions.
-  </p>
-
-  <p>
-    PTLife does not guarantee the accuracy, completeness, or current
-    validity of the information presented. Please verify important
-    details, including opening hours, prices, eligibility requirements,
-    event dates and availability, with the venue or organizer before
-    making plans.
-  </p>
-</section>
   </main>
 
 <script>
@@ -469,7 +483,42 @@ function lisbonDateParts() {
 }
 
 
-function formatMoney(item) {
+function euro(value, currency = "EUR") {
+
+  return new Intl.NumberFormat("en-IE", {
+    style: "currency",
+    currency
+  }).format(value);
+}
+
+
+function getCurrentStandardPrice(
+  admission,
+  today
+) {
+
+  const standard =
+    admission.find(
+      rule =>
+        rule.pricing_type === "fixed" &&
+        rule.price_eur != null &&
+        (!rule.conditions ||
+          rule.conditions.length === 0) &&
+        dateWithinRule(
+          rule,
+          today.date
+        ) &&
+        !hasTimeRestrictions(rule)
+    );
+
+  return standard?.price_eur ?? null;
+}
+
+
+function formatMoney(
+  item,
+  standardPrice = null
+) {
 
   if (
     item.pricing_type === "free" ||
@@ -478,18 +527,60 @@ function formatMoney(item) {
     return "Free";
   }
 
+  if (
+    item.pricing_type ===
+      "percentage_discount" &&
+    item.discount_value != null
+  ) {
+
+    const percent =
+      Number(item.discount_value);
+
+    if (standardPrice != null) {
+
+      const discounted =
+        standardPrice *
+        (1 - percent / 100);
+
+      return `${percent}% off · ${euro(
+        discounted,
+        item.currency || "EUR"
+      )}`;
+    }
+
+    return `${percent}% off`;
+  }
+
+  if (
+    item.pricing_type ===
+      "amount_discount" &&
+    item.discount_value != null
+  ) {
+
+    const amount =
+      Number(item.discount_value);
+
+    return `${euro(
+      amount,
+      item.currency || "EUR"
+    )} off`;
+  }
+
   if (item.price_eur == null) {
     return "See details";
   }
 
-  return new Intl.NumberFormat("en-IE", {
-    style: "currency",
-    currency: item.currency || "EUR"
-  }).format(item.price_eur);
+  return euro(
+    item.price_eur,
+    item.currency || "EUR"
+  );
 }
 
 
-function dateWithinRule(rule, date) {
+function dateWithinRule(
+  rule,
+  date
+) {
 
   if (
     rule.valid_from &&
@@ -534,9 +625,11 @@ function getExceptionForToday(
   exceptions,
   today
 ) {
+
   return exceptions.find(
     item =>
-      item.exception_date === today.date
+      item.exception_date ===
+      today.date
   );
 }
 
@@ -547,7 +640,9 @@ function renderTodayStatus(
 ) {
 
   const box =
-    document.getElementById("today-status");
+    document.getElementById(
+      "today-status"
+    );
 
   const exception =
     getExceptionForToday(
@@ -558,22 +653,31 @@ function renderTodayStatus(
   if (exception) {
 
     if (
-      exception.exception_type === "closed"
+      exception.exception_type ===
+      "closed"
     ) {
+
       box.className =
         "today-status closed";
 
       const strong =
-        document.createElement("strong");
+        document.createElement(
+          "strong"
+        );
 
       strong.textContent =
         "Closed today";
 
       box.appendChild(strong);
 
-      if (exception.note_english) {
+      if (
+        exception.note_english
+      ) {
+
         const detail =
-          document.createElement("div");
+          document.createElement(
+            "div"
+          );
 
         detail.textContent =
           exception.note_english;
@@ -584,32 +688,46 @@ function renderTodayStatus(
       return;
     }
 
+
     if (
       exception.exception_type ===
       "special_hours"
     ) {
+
       box.className =
         "today-status special";
 
       const strong =
-        document.createElement("strong");
+        document.createElement(
+          "strong"
+        );
 
       if (
-        today.time >= exception.opens_at &&
-        today.time < exception.closes_at
+        today.time >=
+          exception.opens_at &&
+        today.time <
+          exception.closes_at
       ) {
+
         strong.textContent =
           `Open today · closes ${exception.closes_at}`;
+
       } else {
+
         strong.textContent =
           `Special hours today · ${exception.opens_at}–${exception.closes_at}`;
       }
 
       box.appendChild(strong);
 
-      if (exception.note_english) {
+      if (
+        exception.note_english
+      ) {
+
         const detail =
-          document.createElement("div");
+          document.createElement(
+            "div"
+          );
 
         detail.textContent =
           exception.note_english;
@@ -629,15 +747,19 @@ function renderTodayStatus(
         today.dayOfWeek
     );
 
+
   if (
     !normal ||
     normal.is_closed
   ) {
+
     box.className =
       "today-status closed";
 
     const strong =
-      document.createElement("strong");
+      document.createElement(
+        "strong"
+      );
 
     strong.textContent =
       "Closed today";
@@ -652,11 +774,14 @@ function renderTodayStatus(
     today.time >= normal.opens_at &&
     today.time < normal.closes_at
   ) {
+
     box.className =
       "today-status open";
 
     const strong =
-      document.createElement("strong");
+      document.createElement(
+        "strong"
+      );
 
     strong.textContent =
       `Open now · closes ${normal.closes_at}`;
@@ -669,12 +794,20 @@ function renderTodayStatus(
       "today-status closed";
 
     const strong =
-      document.createElement("strong");
+      document.createElement(
+        "strong"
+      );
 
-    if (today.time < normal.opens_at) {
+    if (
+      today.time <
+      normal.opens_at
+    ) {
+
       strong.textContent =
         `Closed now · opens today at ${normal.opens_at}`;
+
     } else {
+
       strong.textContent =
         `Closed now · closed at ${normal.closes_at}`;
     }
@@ -691,35 +824,53 @@ function renderHours(data) {
       "opening-hours"
     );
 
-  data.opening_hours.forEach(hours => {
+  data.opening_hours.forEach(
+    hours => {
 
-    const row =
-      document.createElement("div");
+      const row =
+        document.createElement(
+          "div"
+        );
 
-    row.className = "hours-row";
+      row.className =
+        "hours-row";
 
-    const label =
-      document.createElement("span");
+      const label =
+        document.createElement(
+          "span"
+        );
 
-    label.className = "row-label";
+      label.className =
+        "row-label";
 
-    label.textContent =
-      dayNames[hours.day_of_week];
+      label.textContent =
+        dayNames[
+          hours.day_of_week
+        ];
 
-    const value =
-      document.createElement("span");
+      const value =
+        document.createElement(
+          "span"
+        );
 
-    value.className = "row-value";
+      value.className =
+        "row-value";
 
-    value.textContent =
-      hours.is_closed
-        ? "Closed"
-        : `${hours.opens_at}–${hours.closes_at}`;
+      value.textContent =
+        hours.is_closed
+          ? "Closed"
+          : `${hours.opens_at}–${hours.closes_at}`;
 
-    row.append(label, value);
+      row.append(
+        label,
+        value
+      );
 
-    container.appendChild(row);
-  });
+      container.appendChild(
+        row
+      );
+    }
+  );
 }
 
 
@@ -744,6 +895,13 @@ function renderAdmission(
     );
 
 
+  const standardPrice =
+    getCurrentStandardPrice(
+      data.admission,
+      today
+    );
+
+
   const currentRules =
     data.admission.filter(
       rule =>
@@ -751,14 +909,18 @@ function renderAdmission(
           rule,
           today.date
         ) &&
-        !hasTimeRestrictions(rule)
+        !hasTimeRestrictions(
+          rule
+        )
     );
 
 
   const specialRules =
     data.admission.filter(
       rule =>
-        hasTimeRestrictions(rule)
+        hasTimeRestrictions(
+          rule
+        )
     );
 
 
@@ -766,54 +928,90 @@ function renderAdmission(
     data.admission.filter(
       rule =>
         rule.valid_from &&
-        rule.valid_from > today.date &&
-        !hasTimeRestrictions(rule)
+        rule.valid_from >
+          today.date &&
+        !hasTimeRestrictions(
+          rule
+        )
     );
 
 
-  currentRules.forEach(rule => {
+  currentRules.forEach(
+    rule => {
 
-    const row =
-      document.createElement("div");
+      const row =
+        document.createElement(
+          "div"
+        );
 
-    row.className = "price-row";
+      row.className =
+        "price-row";
 
-    const label =
-      document.createElement("span");
+      const label =
+        document.createElement(
+          "span"
+        );
 
-    label.className = "row-label";
+      label.className =
+        "row-label";
 
-    label.textContent =
-      rule.rule_name_english;
+      label.textContent =
+        rule.rule_name_english;
 
-    const value =
-      document.createElement("span");
 
-    value.className =
-      "row-value";
+      const value =
+        document.createElement(
+          "span"
+        );
 
-    value.textContent =
-      formatMoney(rule);
+      value.className =
+        "row-value";
 
-    if (rule.price_eur === 0) {
-      value.classList.add("free");
+      value.textContent =
+        formatMoney(
+          rule,
+          standardPrice
+        );
+
+
+      if (
+        rule.pricing_type ===
+          "free" ||
+        rule.price_eur === 0
+      ) {
+
+        value.classList.add(
+          "free"
+        );
+      }
+
+
+      row.append(
+        label,
+        value
+      );
+
+      currentContainer.appendChild(
+        row
+      );
     }
-
-    row.append(label, value);
-
-    currentContainer.appendChild(row);
-  });
+  );
 
 
-  if (specialRules.length) {
+  if (
+    specialRules.length
+  ) {
 
-    specialContainer.hidden = false;
+    specialContainer.hidden =
+      false;
 
     specialContainer.className =
       "special-admission";
 
     const heading =
-      document.createElement("strong");
+      document.createElement(
+        "strong"
+      );
 
     heading.textContent =
       "Special admission";
@@ -823,202 +1021,276 @@ function renderAdmission(
     );
 
 
-    specialRules.forEach(rule => {
+    specialRules.forEach(
+      rule => {
 
-      const item =
-        document.createElement("div");
+        const item =
+          document.createElement(
+            "div"
+          );
 
-      item.className =
-        "special-rule";
-
-
-      const title =
-        document.createElement("div");
-
-      title.className =
-        "special-rule-title";
-
-      title.textContent =
-        `${rule.rule_name_english}: ${formatMoney(rule)}`;
-
-      item.appendChild(title);
+        item.className =
+          "special-rule";
 
 
-      if (Array.isArray(rule.conditions)) {
+        const title =
+          document.createElement(
+            "div"
+          );
 
-        rule.conditions.forEach(
-          condition => {
+        title.className =
+          "special-rule-title";
 
-            const detail =
-              document.createElement("div");
+        title.textContent =
+          `${rule.rule_name_english}: ${formatMoney(
+            rule,
+            standardPrice
+          )}`;
 
-            detail.className =
-              "special-rule-detail";
+        item.appendChild(
+          title
+        );
 
 
-            if (
-              condition.condition_type ===
-                "resident_country" &&
-              condition.operator ===
-                "equals" &&
-              condition.value_text ===
-                "PT"
-            ) {
-              detail.textContent =
-                "For residents of Portugal.";
+        if (
+          Array.isArray(
+            rule.conditions
+          )
+        ) {
+
+          rule.conditions.forEach(
+            condition => {
+
+              const detail =
+                document.createElement(
+                  "div"
+                );
+
+              detail.className =
+                "special-rule-detail";
+
+
+              if (
+                condition.condition_type ===
+                  "resident_country" &&
+                condition.operator ===
+                  "equals" &&
+                condition.value_text ===
+                  "PT"
+              ) {
+
+                detail.textContent =
+                  "For residents of Portugal.";
+
+              }
+
+              else if (
+                condition.condition_type ===
+                  "resident_country" &&
+                condition.operator ===
+                  "not_equals" &&
+                condition.value_text ===
+                  "PT"
+              ) {
+
+                detail.textContent =
+                  "For visitors who are not residents of Portugal.";
+
+              }
+
+              else if (
+                condition.condition_type ===
+                  "age_min"
+              ) {
+
+                detail.textContent =
+                  `Minimum age: ${condition.value_number}.`;
+
+              }
+
+              else if (
+                condition.condition_type ===
+                  "age_max"
+              ) {
+
+                detail.textContent =
+                  `Maximum age: ${condition.value_number}.`;
+
+              }
+
+              else {
+
+                detail.textContent =
+                  condition.notes_english ||
+                  "";
+              }
+
+
+              if (
+                detail.textContent
+              ) {
+
+                item.appendChild(
+                  detail
+                );
+              }
+
             }
+          );
+        }
 
-            else if (
-              condition.condition_type ===
-                "resident_country" &&
-              condition.operator ===
-                "not_equals" &&
-              condition.value_text ===
-                "PT"
-            ) {
-              detail.textContent =
-                "For visitors who are not residents of Portugal.";
+
+        if (
+          Array.isArray(
+            rule.time_rules
+          )
+        ) {
+
+          rule.time_rules.forEach(
+            timeRule => {
+
+              const detail =
+                document.createElement(
+                  "div"
+                );
+
+              detail.className =
+                "special-rule-detail";
+
+              const pieces = [];
+
+
+              if (
+                timeRule.week_of_month &&
+                timeRule.day_of_week !==
+                  null &&
+                timeRule.day_of_week !==
+                  undefined
+              ) {
+
+                const ordinal = {
+                  1: "First",
+                  2: "Second",
+                  3: "Third",
+                  4: "Fourth",
+                  5: "Fifth"
+                };
+
+                pieces.push(
+                  `${ordinal[timeRule.week_of_month]} ${dayNames[timeRule.day_of_week]} of each month`
+                );
+
+              }
+
+              else if (
+                timeRule.day_of_week !==
+                  null &&
+                timeRule.day_of_week !==
+                  undefined
+              ) {
+
+                pieces.push(
+                  dayNames[
+                    timeRule.day_of_week
+                  ]
+                );
+              }
+
+
+              if (
+                timeRule.starts_at &&
+                timeRule.ends_at
+              ) {
+
+                pieces.push(
+                  `${timeRule.starts_at}–${timeRule.ends_at}`
+                );
+              }
+
+
+              if (
+                pieces.length
+              ) {
+
+                detail.textContent =
+                  pieces.join(
+                    " · "
+                  );
+
+              } else {
+
+                detail.textContent =
+                  timeRule.notes_english ||
+                  "";
+              }
+
+
+              if (
+                detail.textContent
+              ) {
+
+                item.appendChild(
+                  detail
+                );
+              }
+
             }
-
-            else if (
-              condition.condition_type ===
-                "age_min"
-            ) {
-              detail.textContent =
-                `Minimum age: ${condition.value_number}.`;
-            }
-
-            else if (
-              condition.condition_type ===
-                "age_max"
-            ) {
-              detail.textContent =
-                `Maximum age: ${condition.value_number}.`;
-            }
-
-            else {
-              detail.textContent =
-                condition.notes_english || "";
-            }
+          );
+        }
 
 
-            if (detail.textContent) {
-              item.appendChild(detail);
-            }
+        if (
+          rule.proof_required
+        ) {
 
-          }
+          const proof =
+            document.createElement(
+              "div"
+            );
+
+          proof.className =
+            "proof-note";
+
+          proof.textContent =
+            rule.proof_description_english ||
+            "Proof of eligibility may be required.";
+
+          item.appendChild(
+            proof
+          );
+        }
+
+
+        specialContainer.appendChild(
+          item
         );
       }
-
-
-      if (Array.isArray(rule.time_rules)) {
-
-        rule.time_rules.forEach(
-          timeRule => {
-
-            const detail =
-              document.createElement("div");
-
-            detail.className =
-              "special-rule-detail";
-
-            const pieces = [];
-
-
-            if (
-              timeRule.week_of_month &&
-              timeRule.day_of_week !== null &&
-              timeRule.day_of_week !== undefined
-            ) {
-
-              const ordinal = {
-                1: "First",
-                2: "Second",
-                3: "Third",
-                4: "Fourth",
-                5: "Fifth"
-              };
-
-              pieces.push(
-                `${ordinal[timeRule.week_of_month]} ${dayNames[timeRule.day_of_week]} of each month`
-              );
-            }
-
-            else if (
-              timeRule.day_of_week !== null &&
-              timeRule.day_of_week !== undefined
-            ) {
-              pieces.push(
-                dayNames[timeRule.day_of_week]
-              );
-            }
-
-
-            if (
-              timeRule.starts_at &&
-              timeRule.ends_at
-            ) {
-              pieces.push(
-                `${timeRule.starts_at}–${timeRule.ends_at}`
-              );
-            }
-
-
-            if (pieces.length) {
-              detail.textContent =
-                pieces.join(" · ");
-            }
-
-            else {
-              detail.textContent =
-                timeRule.notes_english || "";
-            }
-
-
-            if (detail.textContent) {
-              item.appendChild(detail);
-            }
-
-          }
-        );
-      }
-
-
-      if (rule.proof_required) {
-
-        const proof =
-          document.createElement("div");
-
-        proof.className =
-          "proof-note";
-
-        proof.textContent =
-          rule.proof_description_english ||
-          "Proof of eligibility may be required.";
-
-        item.appendChild(proof);
-      }
-
-
-      specialContainer.appendChild(item);
-
-    });
+    );
   }
 
 
-  if (futureRules.length) {
+  if (
+    futureRules.length
+  ) {
 
-    futureContainer.hidden = false;
+    futureContainer.hidden =
+      false;
 
     futureContainer.className =
       "future-prices";
 
+
     const heading =
-      document.createElement("strong");
+      document.createElement(
+        "strong"
+      );
 
     const earliestDate =
       futureRules
-        .map(rule => rule.valid_from)
+        .map(
+          rule =>
+            rule.valid_from
+        )
         .sort()[0];
 
     heading.textContent =
@@ -1029,58 +1301,100 @@ function renderAdmission(
     );
 
 
-    futureRules.forEach(rule => {
+    futureRules.forEach(
+      rule => {
 
-      const row =
-        document.createElement("div");
+        const row =
+          document.createElement(
+            "div"
+          );
 
-      row.className =
-        "future-price-row";
+        row.className =
+          "future-price-row";
 
-      const label =
-        document.createElement("span");
 
-      label.className =
-        "row-label";
+        const label =
+          document.createElement(
+            "span"
+          );
 
-      label.textContent =
-        rule.rule_name_english;
+        label.className =
+          "row-label";
 
-      const value =
-        document.createElement("span");
+        label.textContent =
+          rule.rule_name_english;
 
-      value.className =
-        "row-value";
 
-      value.textContent =
-        formatMoney(rule);
+        const value =
+          document.createElement(
+            "span"
+          );
 
-      row.append(label, value);
+        value.className =
+          "row-value";
 
-      futureContainer.appendChild(row);
-    });
+        value.textContent =
+          formatMoney(
+            rule,
+            null
+          );
+
+
+        row.append(
+          label,
+          value
+        );
+
+        futureContainer.appendChild(
+          row
+        );
+      }
+    );
   }
 }
 
 
 function renderExceptions(data) {
 
+  if (
+    !Array.isArray(
+      data.schedule_exceptions
+    ) ||
+    data.schedule_exceptions.length === 0
+  ) {
+    return;
+  }
+
+
+  const section =
+    document.getElementById(
+      "exceptions-section"
+    );
+
   const container =
     document.getElementById(
       "exceptions"
     );
 
+  section.hidden = false;
+
+
   data.schedule_exceptions.forEach(
     exception => {
 
       const row =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       row.className =
         "exception-row";
 
+
       const date =
-        document.createElement("span");
+        document.createElement(
+          "span"
+        );
 
       date.className =
         "row-label";
@@ -1090,8 +1404,11 @@ function renderExceptions(data) {
           exception.exception_date
         );
 
+
       const note =
-        document.createElement("span");
+        document.createElement(
+          "span"
+        );
 
       note.className =
         "row-value";
@@ -1100,44 +1417,67 @@ function renderExceptions(data) {
         exception.note_english ||
         exception.exception_type;
 
-      row.append(date, note);
 
-      container.appendChild(row);
+      row.append(
+        date,
+        note
+      );
+
+      container.appendChild(
+        row
+      );
     }
   );
 }
 
 
-function membershipDuration(membership) {
+function membershipDuration(
+  membership
+) {
 
-  if (membership.duration_months) {
+  if (
+    membership.duration_months
+  ) {
 
     const months =
       membership.duration_months;
 
     return months === 12
       ? "12 months"
-      : `${months} month${months === 1 ? "" : "s"}`;
+      : `${months} month${
+          months === 1
+            ? ""
+            : "s"
+        }`;
   }
 
-  if (membership.duration_days) {
+
+  if (
+    membership.duration_days
+  ) {
 
     const days =
       membership.duration_days;
 
-    return `${days} day${days === 1 ? "" : "s"}`;
+    return `${days} day${
+      days === 1 ? "" : "s"
+    }`;
   }
+
 
   return "";
 }
 
 
-function membershipDisplayName(membership) {
+function membershipDisplayName(
+  membership
+) {
 
   const english =
     membership.translations?.find(
       translation =>
-        translation.language_code === "en"
+        translation.language_code ===
+        "en"
     );
 
   return (
@@ -1150,11 +1490,14 @@ function membershipDisplayName(membership) {
 function renderMemberships(data) {
 
   if (
-    !Array.isArray(data.memberships) ||
+    !Array.isArray(
+      data.memberships
+    ) ||
     data.memberships.length === 0
   ) {
     return;
   }
+
 
   const section =
     document.getElementById(
@@ -1166,32 +1509,41 @@ function renderMemberships(data) {
       "memberships"
     );
 
-  section.hidden = false;
+  section.hidden =
+    false;
 
 
   data.memberships.forEach(
     membership => {
 
       const card =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       card.className =
         "membership";
 
 
       const header =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       header.className =
         "membership-header";
 
 
       const headingArea =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
 
       const name =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       name.className =
         "membership-name";
@@ -1203,7 +1555,9 @@ function renderMemberships(data) {
 
 
       const duration =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       duration.className =
         "membership-duration";
@@ -1214,9 +1568,14 @@ function renderMemberships(data) {
         );
 
 
-      headingArea.appendChild(name);
+      headingArea.appendChild(
+        name
+      );
 
-      if (duration.textContent) {
+      if (
+        duration.textContent
+      ) {
+
         headingArea.appendChild(
           duration
         );
@@ -1224,13 +1583,17 @@ function renderMemberships(data) {
 
 
       const price =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       price.className =
         "membership-price";
 
       price.textContent =
-        formatMoney(membership);
+        formatMoney(
+          membership
+        );
 
 
       header.append(
@@ -1238,13 +1601,19 @@ function renderMemberships(data) {
         price
       );
 
-      card.appendChild(header);
+      card.appendChild(
+        header
+      );
 
 
-      if (membership.notes_english) {
+      if (
+        membership.notes_english
+      ) {
 
         const description =
-          document.createElement("div");
+          document.createElement(
+            "div"
+          );
 
         description.className =
           "membership-description";
@@ -1266,7 +1635,9 @@ function renderMemberships(data) {
       ) {
 
         const list =
-          document.createElement("ul");
+          document.createElement(
+            "ul"
+          );
 
         list.className =
           "membership-benefits";
@@ -1275,32 +1646,46 @@ function renderMemberships(data) {
         membership.benefits.forEach(
           benefit => {
 
-            if (!benefit.benefit_english) {
+            if (
+              !benefit.benefit_english
+            ) {
               return;
             }
 
             const item =
-              document.createElement("li");
+              document.createElement(
+                "li"
+              );
 
             item.textContent =
               benefit.benefit_english;
 
-            list.appendChild(item);
-
+            list.appendChild(
+              item
+            );
           }
         );
 
 
-        if (list.children.length) {
-          card.appendChild(list);
+        if (
+          list.children.length
+        ) {
+
+          card.appendChild(
+            list
+          );
         }
       }
 
 
-      if (membership.purchase_url) {
+      if (
+        membership.purchase_url
+      ) {
 
         const link =
-          document.createElement("a");
+          document.createElement(
+            "a"
+          );
 
         link.className =
           "membership-link";
@@ -1317,12 +1702,15 @@ function renderMemberships(data) {
         link.textContent =
           "Membership details";
 
-        card.appendChild(link);
+        card.appendChild(
+          link
+        );
       }
 
 
-      container.appendChild(card);
-
+      container.appendChild(
+        card
+      );
     }
   );
 }
@@ -1337,14 +1725,20 @@ async function loadPlace() {
         `/api/place/${encodeURIComponent(slug)}`
       );
 
-    if (!response.ok) {
+
+    if (
+      !response.ok
+    ) {
+
       throw new Error(
         "Place not found"
       );
     }
 
+
     const data =
       await response.json();
+
 
     const today =
       lisbonDateParts();
@@ -1353,7 +1747,8 @@ async function loadPlace() {
     const english =
       data.translations.find(
         item =>
-          item.language_code === "en"
+          item.language_code ===
+          "en"
       ) ||
       data.translations[0];
 
@@ -1366,20 +1761,26 @@ async function loadPlace() {
 
 
     document
-      .getElementById("place-type")
+      .getElementById(
+        "place-type"
+      )
       .textContent =
         data.place.place_type;
 
 
     document
-      .getElementById("place-name")
+      .getElementById(
+        "place-name"
+      )
       .textContent =
         english?.display_name ||
         data.place.official_name;
 
 
     document
-      .getElementById("place-location")
+      .getElementById(
+        "place-location"
+      )
       .textContent =
         [
           data.place.neighborhood,
@@ -1390,9 +1791,12 @@ async function loadPlace() {
 
 
     document
-      .getElementById("place-description")
+      .getElementById(
+        "place-description"
+      )
       .textContent =
-        english?.short_description || "";
+        english?.short_description ||
+        "";
 
 
     renderTodayStatus(
@@ -1400,20 +1804,28 @@ async function loadPlace() {
       today
     );
 
-    renderHours(data);
+    renderHours(
+      data
+    );
 
     renderAdmission(
       data,
       today
     );
 
-    renderExceptions(data);
+    renderExceptions(
+      data
+    );
 
-    renderMemberships(data);
+    renderMemberships(
+      data
+    );
 
 
     document
-      .getElementById("address")
+      .getElementById(
+        "address"
+      )
       .textContent =
         [
           data.place.address,
@@ -1434,24 +1846,37 @@ async function loadPlace() {
 
 
     document
-      .getElementById("loading")
-      .hidden = true;
+      .getElementById(
+        "loading"
+      )
+      .hidden =
+        true;
+
 
     document
-      .getElementById("place-content")
-      .hidden = false;
+      .getElementById(
+        "place-content"
+      )
+      .hidden =
+        false;
 
 
   } catch (error) {
 
     document
-      .getElementById("loading")
-      .hidden = true;
+      .getElementById(
+        "loading"
+      )
+      .hidden =
+        true;
+
 
     document
-      .getElementById("error")
-      .hidden = false;
-
+      .getElementById(
+        "error"
+      )
+      .hidden =
+        false;
   }
 }
 
