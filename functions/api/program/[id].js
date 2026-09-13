@@ -35,6 +35,10 @@ export async function onRequestGet(context) {
     );
   }
 
+  // --------------------------------------------------
+  // TRANSLATIONS / DESCRIPTIONS
+  // --------------------------------------------------
+
   const translations = await db
     .prepare(`
       SELECT
@@ -49,6 +53,57 @@ export async function onRequestGet(context) {
     `)
     .bind(program.id)
     .all();
+
+  // --------------------------------------------------
+  // PROGRAM DETAILS
+  // --------------------------------------------------
+
+  const details = await db
+    .prepare(`
+      SELECT
+        original_work_title,
+        work_type,
+        original_year,
+        country_code,
+        runtime_minutes,
+        original_language,
+        presentation_language,
+        subtitle_language,
+        surtitles_language,
+        content_rating,
+        notes_original,
+        notes_english
+      FROM program_details
+      WHERE program_id = ?
+      LIMIT 1
+    `)
+    .bind(program.id)
+    .first();
+
+  // --------------------------------------------------
+  // CREDITS
+  // --------------------------------------------------
+
+  const credits = await db
+    .prepare(`
+      SELECT
+        id,
+        credit_type,
+        person_name,
+        character_or_role,
+        sort_order,
+        notes_original,
+        notes_english
+      FROM program_credits
+      WHERE program_id = ?
+      ORDER BY sort_order, id
+    `)
+    .bind(program.id)
+    .all();
+
+  // --------------------------------------------------
+  // OCCURRENCES / PERFORMANCE DATES
+  // --------------------------------------------------
 
   const occurrences = await db
     .prepare(`
@@ -66,6 +121,10 @@ export async function onRequestGet(context) {
     `)
     .bind(program.id)
     .all();
+
+  // --------------------------------------------------
+  // BASE TICKET PRICES
+  // --------------------------------------------------
 
   const ticketRules = await db
     .prepare(`
@@ -90,6 +149,10 @@ export async function onRequestGet(context) {
     .bind(program.id)
     .all();
 
+  // --------------------------------------------------
+  // DISCOUNTS
+  // --------------------------------------------------
+
   const discounts = await db
     .prepare(`
       SELECT
@@ -113,7 +176,9 @@ export async function onRequestGet(context) {
     .all();
 
   const discountIds =
-    discounts.results.map(discount => discount.id);
+    discounts.results.map(
+      discount => discount.id
+    );
 
   let discountConditions = [];
 
@@ -145,14 +210,22 @@ export async function onRequestGet(context) {
   }
 
   const ticketDiscounts =
-    discounts.results.map(discount => ({
-      ...discount,
-      conditions:
-        discountConditions.filter(
-          condition =>
-            condition.discount_id === discount.id
-        )
-    }));
+    discounts.results.map(
+      discount => ({
+        ...discount,
+
+        conditions:
+          discountConditions.filter(
+            condition =>
+              condition.discount_id ===
+              discount.id
+          )
+      })
+    );
+
+  // --------------------------------------------------
+  // ACTION DATES
+  // --------------------------------------------------
 
   const actions = await db
     .prepare(`
@@ -173,19 +246,41 @@ export async function onRequestGet(context) {
     .bind(program.id)
     .all();
 
+  // --------------------------------------------------
+  // RESPONSE
+  // --------------------------------------------------
+
   return Response.json({
     program,
-    translations: translations.results,
-    occurrences: occurrences.results,
+
+    translations:
+      translations.results,
+
+    details:
+      details || null,
+
+    credits:
+      credits.results,
+
+    occurrences:
+      occurrences.results,
+
     ticket_rules:
-      ticketRules.results.map(ticket => ({
-        ...ticket,
-        price_eur:
-          ticket.price_cents === null
-            ? null
-            : ticket.price_cents / 100
-      })),
-    ticket_discounts: ticketDiscounts,
-    action_dates: actions.results
+      ticketRules.results.map(
+        ticket => ({
+          ...ticket,
+
+          price_eur:
+            ticket.price_cents === null
+              ? null
+              : ticket.price_cents / 100
+        })
+      ),
+
+    ticket_discounts:
+      ticketDiscounts,
+
+    action_dates:
+      actions.results
   });
 }
