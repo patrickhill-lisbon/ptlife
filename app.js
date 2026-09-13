@@ -198,4 +198,254 @@ document.addEventListener("DOMContentLoaded", () => {
   // Start with Today selected
   showTime("today");
 
+
+  // --------------------------------------------------
+  // SEARCH
+  // --------------------------------------------------
+
+  const searchInput =
+    document.getElementById("site-search");
+
+  const searchResults =
+    document.getElementById("search-results");
+
+  let searchTimer = null;
+
+
+  function formatSearchDate(value) {
+    if (!value) {
+      return "";
+    }
+
+    const date =
+      new Date(value);
+
+    return new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+        timeZone: "Europe/Lisbon"
+      }
+    ).format(date);
+  }
+
+
+  function clearSearchResults() {
+    if (!searchResults) {
+      return;
+    }
+
+    searchResults.innerHTML = "";
+    searchResults.hidden = true;
+  }
+
+
+  function renderSearchResults(data) {
+    if (!searchResults) {
+      return;
+    }
+
+    searchResults.innerHTML = "";
+
+    if (
+      !data.results ||
+      data.results.length === 0
+    ) {
+      const empty =
+        document.createElement("div");
+
+      empty.className =
+        "search-result-empty";
+
+      empty.textContent =
+        "No matching events or places found.";
+
+      searchResults.appendChild(empty);
+      searchResults.hidden = false;
+
+      return;
+    }
+
+
+    data.results.forEach(result => {
+
+      const link =
+        document.createElement("a");
+
+      link.className =
+        "search-result";
+
+      link.href =
+        result.url;
+
+
+      const title =
+        document.createElement("div");
+
+      title.className =
+        "search-result-title";
+
+      title.textContent =
+        result.title;
+
+
+      const meta =
+        document.createElement("div");
+
+      meta.className =
+        "search-result-meta";
+
+
+      const metaParts = [];
+
+      if (result.subtitle) {
+        metaParts.push(
+          result.subtitle
+        );
+      }
+
+      if (result.next_occurrence) {
+        metaParts.push(
+          formatSearchDate(
+            result.next_occurrence
+          )
+        );
+      }
+
+      meta.textContent =
+        metaParts.join(" · ");
+
+
+      const description =
+        document.createElement("div");
+
+      description.className =
+        "search-result-description";
+
+      description.textContent =
+        result.description || "";
+
+
+      link.appendChild(title);
+
+      if (meta.textContent) {
+        link.appendChild(meta);
+      }
+
+      if (description.textContent) {
+        link.appendChild(description);
+      }
+
+      searchResults.appendChild(link);
+    });
+
+
+    searchResults.hidden = false;
+  }
+
+
+  async function runSearch(query) {
+    if (
+      !query ||
+      query.trim().length < 2
+    ) {
+      clearSearchResults();
+      return;
+    }
+
+    try {
+      const response =
+        await fetch(
+          `/api/search?q=${encodeURIComponent(
+            query.trim()
+          )}`
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          "Search request failed"
+        );
+      }
+
+      const data =
+        await response.json();
+
+      renderSearchResults(data);
+
+    } catch (error) {
+      searchResults.innerHTML = "";
+
+      const message =
+        document.createElement("div");
+
+      message.className =
+        "search-result-empty";
+
+      message.textContent =
+        "Search is temporarily unavailable.";
+
+      searchResults.appendChild(message);
+      searchResults.hidden = false;
+    }
+  }
+
+
+  if (
+    searchInput &&
+    searchResults
+  ) {
+
+    searchInput.addEventListener(
+      "input",
+      event => {
+
+        clearTimeout(searchTimer);
+
+        const query =
+          event.target.value;
+
+        searchTimer =
+          setTimeout(
+            () => {
+              runSearch(query);
+            },
+            250
+          );
+      }
+    );
+
+
+    searchInput.addEventListener(
+      "keydown",
+      event => {
+
+        if (
+          event.key === "Escape"
+        ) {
+          searchInput.value = "";
+          clearSearchResults();
+        }
+      }
+    );
+
+
+    document.addEventListener(
+      "click",
+      event => {
+
+        if (
+          !event.target.closest(
+            ".search-area"
+          )
+        ) {
+          clearSearchResults();
+        }
+      }
+    );
+  }
+
 });
