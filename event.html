@@ -53,6 +53,22 @@
       color: #555d57;
     }
 
+    .event-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+      margin-top: 1rem;
+    }
+
+    .meta-chip {
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      background: #f2f4f1;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #4f5751;
+    }
+
     .event-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -70,6 +86,17 @@
     .event-card h2 {
       margin: 0 0 1rem;
       font-size: 1.45rem;
+    }
+
+    .event-card h3 {
+      margin: 1rem 0 0.4rem;
+      font-size: 1.05rem;
+    }
+
+    .about-text {
+      line-height: 1.6;
+      color: #4f5751;
+      white-space: pre-line;
     }
 
     .occurrence {
@@ -104,7 +131,8 @@
     }
 
     .ticket-row,
-    .discount-row {
+    .discount-row,
+    .credit-row {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
@@ -114,7 +142,8 @@
     }
 
     .ticket-row:last-child,
-    .discount-row:last-child {
+    .discount-row:last-child,
+    .credit-row:last-child {
       border-bottom: 0;
     }
 
@@ -128,7 +157,8 @@
       text-align: right;
     }
 
-    .discount-detail {
+    .discount-detail,
+    .credit-detail {
       margin-top: 0.25rem;
       color: #626962;
       font-size: 0.92rem;
@@ -197,7 +227,8 @@
       }
 
       .ticket-row,
-      .discount-row {
+      .discount-row,
+      .credit-row {
         flex-wrap: wrap;
       }
 
@@ -237,6 +268,12 @@
           class="event-description"
         ></p>
 
+        <div
+          id="event-meta"
+          class="event-meta"
+          hidden
+        ></div>
+
       </header>
 
       <div
@@ -245,6 +282,25 @@
       ></div>
 
       <div class="event-grid">
+
+        <section
+          class="event-card"
+          id="about-section"
+          hidden
+        >
+          <h2>About</h2>
+
+          <div
+            id="about-text"
+            class="about-text"
+          ></div>
+
+          <div
+            id="work-info"
+            class="discount-detail"
+            style="margin-top: 1rem;"
+          ></div>
+        </section>
 
         <section class="event-card">
           <h2>Dates & times</h2>
@@ -277,6 +333,15 @@
         >
           <h2>Discounts & concessions</h2>
           <div id="discounts"></div>
+        </section>
+
+        <section
+          class="event-card"
+          id="credits-section"
+          hidden
+        >
+          <h2>Credits</h2>
+          <div id="credits"></div>
         </section>
 
         <section class="event-card">
@@ -354,6 +419,7 @@ function euro(
 
 
 function parseLocalDateTime(value) {
+
   if (!value) {
     return null;
   }
@@ -434,6 +500,356 @@ function formatTime(value) {
     ":" +
     String(parts.minute)
       .padStart(2, "0")
+  );
+}
+
+
+function humanizeCreditType(type) {
+
+  const labels = {
+    choreographer: "Choreography",
+    director: "Director",
+    performer: "Performer",
+    actor: "Cast",
+    playwright: "Playwright",
+    composer: "Composer",
+    conductor: "Conductor",
+    orchestra: "Orchestra",
+    musician: "Musician",
+    dramaturgy: "Dramaturgy",
+    lighting_design: "Lighting",
+    costume_design: "Costumes",
+    artistic_assistance: "Artistic assistance",
+    speaker: "Speaker",
+    curator: "Curator"
+  };
+
+  return (
+    labels[type] ||
+    type
+      .replaceAll("_", " ")
+      .replace(
+        /\b\w/g,
+        letter =>
+          letter.toUpperCase()
+      )
+  );
+}
+
+
+function addMetaChip(text) {
+
+  if (!text) {
+    return;
+  }
+
+  const container =
+    document.getElementById(
+      "event-meta"
+    );
+
+  const chip =
+    document.createElement(
+      "span"
+    );
+
+  chip.className =
+    "meta-chip";
+
+  chip.textContent =
+    text;
+
+  container.appendChild(
+    chip
+  );
+
+  container.hidden =
+    false;
+}
+
+
+function renderDetails(
+  data,
+  english
+) {
+
+  const details =
+    data.details;
+
+  const fullDescription =
+    english?.full_description;
+
+
+  if (
+    fullDescription ||
+    details
+  ) {
+
+    const section =
+      document.getElementById(
+        "about-section"
+      );
+
+    section.hidden =
+      false;
+
+
+    if (
+      fullDescription
+    ) {
+
+      document
+        .getElementById(
+          "about-text"
+        )
+        .textContent =
+          fullDescription;
+    }
+
+
+    if (
+      details
+    ) {
+
+      const workPieces =
+        [];
+
+
+      if (
+        details.original_work_title &&
+        details.original_work_title !==
+          data.program.official_title
+      ) {
+
+        workPieces.push(
+          `Original work: ${details.original_work_title}`
+        );
+      }
+
+
+      if (
+        details.original_year
+      ) {
+
+        workPieces.push(
+          String(
+            details.original_year
+          )
+        );
+      }
+
+
+      if (
+        details.country_code
+      ) {
+
+        workPieces.push(
+          details.country_code
+        );
+      }
+
+
+      document
+        .getElementById(
+          "work-info"
+        )
+        .textContent =
+          workPieces.join(
+            " · "
+          );
+
+
+      if (
+        details.runtime_minutes
+      ) {
+
+        addMetaChip(
+          `${details.runtime_minutes} min`
+        );
+      }
+
+
+      if (
+        details.presentation_language
+      ) {
+
+        addMetaChip(
+          details.presentation_language
+        );
+      }
+
+      else if (
+        details.original_language
+      ) {
+
+        addMetaChip(
+          details.original_language
+        );
+      }
+
+
+      if (
+        details.subtitle_language
+      ) {
+
+        addMetaChip(
+          `${details.subtitle_language} subtitles`
+        );
+      }
+
+
+      if (
+        details.surtitles_language
+      ) {
+
+        addMetaChip(
+          `${details.surtitles_language} surtitles`
+        );
+      }
+
+
+      if (
+        details.content_rating
+      ) {
+
+        addMetaChip(
+          details.content_rating
+        );
+      }
+
+
+      if (
+        details.notes_english
+      ) {
+
+        const lower =
+          details.notes_english
+            .toLowerCase();
+
+        if (
+          lower.includes(
+            "ages 6+"
+          )
+        ) {
+
+          addMetaChip(
+            "Ages 6+"
+          );
+        }
+      }
+
+    }
+  }
+}
+
+
+function renderCredits(data) {
+
+  if (
+    !Array.isArray(
+      data.credits
+    ) ||
+    data.credits.length === 0
+  ) {
+    return;
+  }
+
+
+  const section =
+    document.getElementById(
+      "credits-section"
+    );
+
+  const container =
+    document.getElementById(
+      "credits"
+    );
+
+  section.hidden =
+    false;
+
+
+  data.credits.forEach(
+    credit => {
+
+      const row =
+        document.createElement(
+          "div"
+        );
+
+      row.className =
+        "credit-row";
+
+
+      const labelArea =
+        document.createElement(
+          "div"
+        );
+
+      labelArea.className =
+        "row-label";
+
+
+      const type =
+        document.createElement(
+          "div"
+        );
+
+      type.textContent =
+        humanizeCreditType(
+          credit.credit_type
+        );
+
+
+      if (
+        credit.character_or_role
+      ) {
+
+        const detail =
+          document.createElement(
+            "div"
+          );
+
+        detail.className =
+          "credit-detail";
+
+        detail.textContent =
+          credit.character_or_role;
+
+        labelArea.append(
+          type,
+          detail
+        );
+
+      } else {
+
+        labelArea.appendChild(
+          type
+        );
+      }
+
+
+      const person =
+        document.createElement(
+          "div"
+        );
+
+      person.className =
+        "row-value";
+
+      person.textContent =
+        credit.person_name;
+
+
+      row.append(
+        labelArea,
+        person
+      );
+
+      container.appendChild(
+        row
+      );
+    }
   );
 }
 
@@ -560,20 +976,30 @@ function renderTickets(data) {
       )
       .map(
         ticket =>
-          Number(ticket.price_eur)
+          Number(
+            ticket.price_eur
+          )
       );
 
 
-  if (fixedPrices.length) {
+  if (
+    fixedPrices.length
+  ) {
 
     const minimum =
-      Math.min(...fixedPrices);
+      Math.min(
+        ...fixedPrices
+      );
 
     const maximum =
-      Math.max(...fixedPrices);
+      Math.max(
+        ...fixedPrices
+      );
 
 
-    if (minimum === maximum) {
+    if (
+      minimum === maximum
+    ) {
 
       summary.textContent =
         euro(minimum);
@@ -622,7 +1048,8 @@ function renderTickets(data) {
         );
 
       label.textContent =
-        ticket.ticket_name_english;
+        ticket
+          .ticket_name_english;
 
 
       labelArea.appendChild(
@@ -669,7 +1096,9 @@ function renderTickets(data) {
         value.textContent =
           "Free";
 
-      } else if (
+      }
+
+      else if (
         ticket.price_eur != null
       ) {
 
@@ -680,7 +1109,9 @@ function renderTickets(data) {
               "EUR"
           );
 
-      } else {
+      }
+
+      else {
 
         value.textContent =
           "See details";
@@ -723,6 +1154,7 @@ function discountValueText(
         discount.discount_value
       ) === 0
     ) {
+
       return "Free";
     }
 
@@ -761,7 +1193,8 @@ function renderDiscounts(data) {
     !Array.isArray(
       data.ticket_discounts
     ) ||
-    data.ticket_discounts.length === 0
+    data.ticket_discounts.length ===
+      0
   ) {
     return;
   }
@@ -777,7 +1210,8 @@ function renderDiscounts(data) {
       "discounts"
     );
 
-  section.hidden = false;
+  section.hidden =
+    false;
 
 
   data.ticket_discounts.forEach(
@@ -890,7 +1324,8 @@ function renderActions(data) {
     !Array.isArray(
       data.action_dates
     ) ||
-    data.action_dates.length === 0
+    data.action_dates.length ===
+      0
   ) {
     return;
   }
@@ -901,7 +1336,8 @@ function renderActions(data) {
       "action-dates"
     );
 
-  container.hidden = false;
+  container.hidden =
+    false;
 
 
   data.action_dates.forEach(
@@ -923,7 +1359,10 @@ function renderActions(data) {
 
       title.textContent =
         action.action_type
-          .replaceAll("_", " ");
+          .replaceAll(
+            "_",
+            " "
+          );
 
 
       const date =
@@ -990,7 +1429,9 @@ async function loadEvent() {
       );
 
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
 
       throw new Error(
         "Event not found"
@@ -1051,11 +1492,13 @@ async function loadEvent() {
 
 
     if (
-      data.program.parent_place_name
+      data.program
+        .parent_place_name
     ) {
 
       locationPieces.push(
-        data.program.parent_place_name
+        data.program
+          .parent_place_name
       );
     }
 
@@ -1065,13 +1508,35 @@ async function loadEvent() {
         "event-location"
       )
       .textContent =
-        locationPieces.join(" · ");
+        locationPieces.join(
+          " · "
+        );
 
 
-    renderOccurrences(data);
-    renderTickets(data);
-    renderDiscounts(data);
-    renderActions(data);
+    renderDetails(
+      data,
+      english
+    );
+
+    renderOccurrences(
+      data
+    );
+
+    renderTickets(
+      data
+    );
+
+    renderDiscounts(
+      data
+    );
+
+    renderCredits(
+      data
+    );
+
+    renderActions(
+      data
+    );
 
 
     document
@@ -1090,11 +1555,15 @@ async function loadEvent() {
 
 
     if (
-      data.program.parent_place_name
+      data.program
+        .parent_place_name
     ) {
 
       parent.textContent =
-        `Part of ${data.program.parent_place_name}`;
+        `Part of ${
+          data.program
+            .parent_place_name
+        }`;
     }
 
 
@@ -1115,7 +1584,8 @@ async function loadEvent() {
 
     } else {
 
-      venueLink.hidden = true;
+      venueLink.hidden =
+        true;
     }
 
 
