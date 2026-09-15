@@ -1,22 +1,25 @@
 /*
  * Worth A Go — Generic Extractor
- * Version 1
+ * Version 2
  *
- * PURPOSE
- * -------
- * Extract useful activity/program information from arbitrary
- * public webpages without requiring a scraper for every website.
+ * READ ONLY — does not write to D1.
  *
- * IMPORTANT PRINCIPLES
- * --------------------
+ * PRINCIPLES
+ * ----------
  * 1. Generic extraction is the default.
- * 2. Site-specific filters fix anomalies; they do not replace
- *    the generic extractor.
+ * 2. Site-specific filters only normalize genuine anomalies.
  * 3. Prefer authoritative structured data when available.
- * 4. Visible page content can supplement structured data.
- * 5. Never invent missing information.
- * 6. If the source does not mention an attribute, omit it.
- * 7. This endpoint is READ ONLY. It does not write to D1.
+ * 4. Visible content supplements structured data.
+ * 5. Preserve semantic context before applying regex parsers.
+ * 6. Never invent missing information.
+ * 7. If the source does not mention something, omit it.
+ */
+
+
+/*
+ * ============================================================
+ * URL / SITE PROFILE
+ * ============================================================
  */
 
 function hostnameFor(url) {
@@ -31,33 +34,21 @@ function hostnameFor(url) {
 
 
 /*
- * ------------------------------------------------------------
- * SITE PROFILES / ANOMALY FILTERS
- * ------------------------------------------------------------
- *
  * Most websites should NOT appear here.
  *
- * A site is added only when we discover a genuine anomaly
- * that cannot reasonably be handled by the generic parser.
+ * Later, genuine anomalies can be handled with something like:
  *
- * For now this is intentionally empty.
+ * const SITE_PROFILES = {
+ *   "example.com": {
+ *     preExtract: normalizeExample
+ *   }
+ * };
+ *
+ * For now this remains deliberately empty.
  */
 
-const SITE_PROFILES = {
-};
+const SITE_PROFILES = {};
 
-
-/*
- * Find a profile for the current website.
- *
- * Later this can support:
- *
- * "ccb.pt": {
- *   preExtract: normalizeCcb
- * }
- *
- * But only if we actually need it.
- */
 
 function getSiteProfile(url) {
   const hostname = hostnameFor(url);
@@ -69,9 +60,9 @@ function getSiteProfile(url) {
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
  * HTML UTILITIES
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 function decodeHtml(text) {
@@ -96,13 +87,16 @@ function decodeHtml(text) {
   return text
     .replace(
       /&([a-zA-Z]+);/g,
-      (match, name) =>
-        Object.prototype.hasOwnProperty.call(
+      (match, name) => {
+        const key = name.toLowerCase();
+
+        return Object.prototype.hasOwnProperty.call(
           named,
-          name.toLowerCase()
+          key
         )
-          ? named[name.toLowerCase()]
-          : match
+          ? named[key]
+          : match;
+      }
     )
     .replace(
       /&#(\d+);/g,
@@ -119,32 +113,41 @@ function decodeHtml(text) {
 }
 
 
-function stripTags(text) {
+function normalizeWhitespace(text) {
   if (!text) return "";
 
-  return decodeHtml(
-    text
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/p>/gi, "\n")
-      .replace(/<\/li>/gi, "\n")
-      .replace(/<\/h[1-6]>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-  )
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t\r\n]+/g, " ")
     .trim();
 }
 
 
+function stripTags(text) {
+  if (!text) return "";
+
+  return normalizeWhitespace(
+    decodeHtml(
+      text
+        .replace(/<br\s*\/?>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+    )
+  );
+}
+
+
 /*
- * Remove content that normally creates noise for event extraction.
+ * Remove elements that generally contain no useful event data.
  *
- * We deliberately do NOT attempt to produce perfect readable text
- * yet. This is just our first generic cleaning stage.
+ * IMPORTANT:
+ * We are deliberately conservative here.
+ *
+ * We do NOT yet remove <header>, <nav>, <footer>, etc.
+ * because some badly structured sites may place useful content
+ * inside them.
  */
 
-function cleanHtml(html) {
+function removeNonContentHtml(html) {
   return html
     .replace(
       /<script\b[^>]*>[\s\S]*?<\/script>/gi,
@@ -159,6 +162,10 @@ function cleanHtml(html) {
       " "
     )
     .replace(
+      /<svg\b[^>]*>[\s\S]*?<\/svg>/gi,
+      " "
+    )
+    .replace(
       /<!--[\s\S]*?-->/g,
       " "
     );
@@ -166,9 +173,9 @@ function cleanHtml(html) {
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
  * JSON-LD
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 function extractJsonLd(html) {
@@ -188,8 +195,8 @@ function extractJsonLd(html) {
       blocks.push(JSON.parse(raw));
     } catch {
       /*
-       * Malformed JSON-LD should never make the
-       * entire extraction fail.
+       * Malformed JSON-LD must not cause the page
+       * extraction to fail.
        */
     }
   }
@@ -197,20 +204,6 @@ function extractJsonLd(html) {
   return blocks;
 }
 
-
-/*
- * Schema.org event-like objects.
- *
- * This deliberately accepts Event subtypes such as:
- *
- * Event
- * MusicEvent
- * TheaterEvent
- * DanceEvent
- * ScreeningEvent
- * Festival
- * CourseInstance
- */
 
 function isEventType(type) {
   if (!type) return false;
@@ -261,9 +254,9 @@ function findSchemaEvents(
     found.push(value);
 
     /*
-     * Do not automatically add nested subEvents as
-     * separate programs. Later reconciliation decides
-     * whether they are occurrences.
+     * Nested subEvents are not automatically separate
+     * programs. Reconciliation will eventually decide
+     * whether they represent occurrences.
      */
     return found;
   }
@@ -286,69 +279,31 @@ function findSchemaEvents(
 
 
 /*
- * ------------------------------------------------------------
- * GENERIC PAGE TITLE
- * ------------------------------------------------------------
- */
-
-function extractH1(html) {
-  const match = html.match(
-    /<h1\b[^>]*>([\s\S]*?)<\/h1>/i
-  );
-
-  if (!match) return null;
-
-  const value = stripTags(match[1]);
-
-  return value || null;
-}
-
-
-function extractTitleTag(html) {
-  const match = html.match(
-    /<title\b[^>]*>([\s\S]*?)<\/title>/i
-  );
-
-  if (!match) return null;
-
-  const value = stripTags(match[1]);
-
-  return value || null;
-}
-
-
-/*
- * ------------------------------------------------------------
- * GENERIC PAGE REPRESENTATION
- * ------------------------------------------------------------
- *
- * This gives later parsers something simpler than 150 KB of
- * raw HTML.
- */
-
-function buildPageText(html) {
-  const cleaned = cleanHtml(html);
-
-  return stripTags(cleaned);
-}
-
-
-/*
- * ------------------------------------------------------------
- * STRUCTURED EVENT SUMMARY
- * ------------------------------------------------------------
- *
- * For this first version we extract only enough structured
- * information to inspect what arbitrary sites provide.
- *
- * We will add the generic date/time/price/etc. recognizers
- * after testing this foundation.
+ * ============================================================
+ * STRUCTURED DATA NORMALIZATION
+ * ============================================================
  */
 
 function schemaName(value) {
   if (!value) return undefined;
 
   if (typeof value === "string") {
+    /*
+     * Some Schema.org implementations incorrectly put
+     * a type name in performer rather than an actual name.
+     *
+     * Example:
+     * "performer": "Organization"
+     *
+     * That is not useful program information.
+     */
+    if (
+      value === "Organization" ||
+      value === "Person"
+    ) {
+      return undefined;
+    }
+
     return decodeHtml(value);
   }
 
@@ -398,7 +353,7 @@ function summarizeSchemaEvent(event) {
 
   if (event.name) {
     result.title =
-      decodeHtml(event.name);
+      stripTags(event.name);
   }
 
   if (event.description) {
@@ -472,27 +427,27 @@ function summarizeSchemaEvent(event) {
     ) {
       if (address.streetAddress) {
         place.street =
-          address.streetAddress;
+          stripTags(address.streetAddress);
       }
 
       if (address.addressLocality) {
         place.locality =
-          address.addressLocality;
+          stripTags(address.addressLocality);
       }
 
       if (address.addressRegion) {
         place.region =
-          address.addressRegion;
+          stripTags(address.addressRegion);
       }
 
       if (address.postalCode) {
         place.postal_code =
-          address.postalCode;
+          stripTags(address.postalCode);
       }
 
       if (address.addressCountry) {
         place.country =
-          address.addressCountry;
+          stripTags(address.addressCountry);
       }
     }
 
@@ -506,9 +461,505 @@ function summarizeSchemaEvent(event) {
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
+ * PAGE TITLE
+ * ============================================================
+ */
+
+function extractH1(html) {
+  const match = html.match(
+    /<h1\b[^>]*>([\s\S]*?)<\/h1>/i
+  );
+
+  if (!match) return null;
+
+  const value = stripTags(match[1]);
+
+  return value || null;
+}
+
+
+function extractTitleTag(html) {
+  const match = html.match(
+    /<title\b[^>]*>([\s\S]*?)<\/title>/i
+  );
+
+  if (!match) return null;
+
+  const value = stripTags(match[1]);
+
+  return value || null;
+}
+
+
+/*
+ * ============================================================
+ * SEMANTIC BLOCK EXTRACTION
+ * ============================================================
+ *
+ * Instead of flattening the entire page into one giant string,
+ * preserve meaningful blocks.
+ *
+ * Later parsers will use nearby blocks as context.
+ *
+ * Example:
+ *
+ *   heading: Dates / Schedules
+ *   text:    Saturday, 26 September 2026
+ *   text:    7:00pm
+ *
+ * is much more useful than simply finding "7:00pm"
+ * somewhere in the webpage.
+ */
+
+
+function classifyElement(tag) {
+  const lower = tag.toLowerCase();
+
+  if (/^h[1-6]$/.test(lower)) {
+    return "heading";
+  }
+
+  if (lower === "li") {
+    return "list_item";
+  }
+
+  if (lower === "dt") {
+    return "label";
+  }
+
+  if (lower === "dd") {
+    return "value";
+  }
+
+  if (
+    lower === "p" ||
+    lower === "figcaption" ||
+    lower === "caption"
+  ) {
+    return "text";
+  }
+
+  return "text";
+}
+
+
+/*
+ * Some labels frequently occur as short standalone blocks even
+ * when the publisher didn't use semantic HTML such as <dt>.
+ *
+ * This is NOT event extraction yet.
+ *
+ * We're simply identifying text that is likely functioning as
+ * a label so later parsers can use it as context.
+ */
+
+const GENERIC_LABELS = new Set([
+  "date",
+  "dates",
+  "date / time",
+  "date / times",
+  "dates / schedules",
+  "schedule",
+  "schedules",
+  "when",
+
+  "data",
+  "datas",
+  "data / horário",
+  "datas / horários",
+  "horário",
+  "horários",
+
+  "time",
+  "times",
+  "duration",
+  "duração",
+
+  "price",
+  "prices",
+  "pricing",
+  "preço",
+  "preços",
+
+  "ticket",
+  "tickets",
+  "bilhete",
+  "bilhetes",
+
+  "age",
+  "ages",
+  "idade",
+  "idades",
+
+  "language",
+  "languages",
+  "idioma",
+  "idiomas",
+
+  "accessibility",
+  "acessibilidade",
+
+  "capacity",
+  "lotação",
+  "participants",
+  "participantes",
+
+  "location",
+  "venue",
+  "place",
+  "local",
+  "meeting point",
+  "ponto de encontro",
+  "departure",
+  "departure point",
+  "partida",
+  "ponto de partida",
+
+  "booking",
+  "reservation",
+  "reservations",
+  "reserva",
+  "reservas",
+
+  "registration",
+  "inscrição",
+  "inscrições",
+
+  "opening hours",
+  "opening times",
+  "horário de funcionamento",
+
+  "information",
+  "informações",
+  "details",
+  "detalhes"
+]);
+
+
+function looksLikeKnownLabel(text) {
+  if (!text) return false;
+
+  const normalized =
+    text
+      .toLowerCase()
+      .replace(/[:：]\s*$/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  return GENERIC_LABELS.has(normalized);
+}
+
+
+/*
+ * Prevent exact adjacent duplicates.
+ *
+ * Websites frequently contain the same content in both desktop
+ * and mobile navigation/layout structures.
+ *
+ * We remain conservative: only immediately repeated identical
+ * blocks are removed here.
+ */
+
+function dedupeAdjacentBlocks(blocks) {
+  const result = [];
+
+  for (const block of blocks) {
+    const previous =
+      result[result.length - 1];
+
+    if (
+      previous &&
+      previous.type === block.type &&
+      previous.text === block.text
+    ) {
+      continue;
+    }
+
+    result.push(block);
+  }
+
+  return result;
+}
+
+
+function extractSemanticBlocks(html) {
+  const cleaned =
+    removeNonContentHtml(html);
+
+  const blocks = [];
+
+  /*
+   * Capture elements that naturally divide useful content.
+   *
+   * We intentionally avoid div/span here because capturing every
+   * nested container would create enormous duplication.
+   */
+
+  const blockRegex =
+    /<(h[1-6]|p|li|dt|dd|figcaption|caption)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+
+  let match;
+
+  while ((match = blockRegex.exec(cleaned)) !== null) {
+    const tag =
+      match[1].toLowerCase();
+
+    const text =
+      stripTags(match[2]);
+
+    if (!text) continue;
+
+    /*
+     * Very large blocks are often wrappers caused by invalid or
+     * unusual markup. Keep them for now but cap diagnostics later.
+     */
+
+    let type =
+      classifyElement(tag);
+
+    if (
+      type === "text" &&
+      looksLikeKnownLabel(text)
+    ) {
+      type = "label";
+    }
+
+    blocks.push({
+      type,
+      tag,
+      text
+    });
+  }
+
+  return dedupeAdjacentBlocks(blocks);
+}
+
+
+/*
+ * ============================================================
+ * LINKS
+ * ============================================================
+ *
+ * Links will eventually be important for:
+ *
+ * Buy tickets
+ * Book now
+ * Register
+ * Check availability
+ *
+ * For now we merely preserve them.
+ */
+
+function extractLinks(html, baseUrl) {
+  const links = [];
+
+  const regex =
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match;
+
+  while ((match = regex.exec(html)) !== null) {
+    const href =
+      decodeHtml(match[1]).trim();
+
+    const text =
+      stripTags(match[2]);
+
+    if (!href || !text) continue;
+
+    if (
+      href.startsWith("#") ||
+      href.toLowerCase().startsWith("javascript:")
+    ) {
+      continue;
+    }
+
+    let absoluteUrl;
+
+    try {
+      absoluteUrl =
+        new URL(
+          href,
+          baseUrl
+        ).toString();
+    } catch {
+      continue;
+    }
+
+    links.push({
+      text,
+      url: absoluteUrl
+    });
+  }
+
+  return links;
+}
+
+
+/*
+ * ============================================================
+ * FLAT PAGE TEXT
+ * ============================================================
+ *
+ * Keep this diagnostic for now.
+ *
+ * Later, most extraction should operate on semantic blocks
+ * rather than this flattened representation.
+ */
+
+function buildPageText(html) {
+  const cleaned =
+    removeNonContentHtml(html);
+
+  return decodeHtml(
+    cleaned
+      .replace(
+        /<\/(h[1-6]|p|li|dt|dd|div|section|article)>/gi,
+        "\n"
+      )
+      .replace(
+        /<br\s*\/?>/gi,
+        "\n"
+      )
+      .replace(
+        /<[^>]+>/g,
+        " "
+      )
+  )
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+
+/*
+ * ============================================================
+ * DIAGNOSTIC BLOCK SELECTION
+ * ============================================================
+ *
+ * At this stage we want to inspect the representation without
+ * returning thousands of navigation blocks.
+ *
+ * We return:
+ *
+ * - blocks near the H1
+ * - blocks containing known labels
+ * - blocks near those labels
+ *
+ * This is diagnostic only. The complete block array remains
+ * available internally to future parsers.
+ */
+
+function selectDiagnosticBlocks(
+  blocks,
+  h1,
+  maxBlocks = 120
+) {
+  const interestingIndexes =
+    new Set();
+
+  /*
+   * Find H1/title area.
+   */
+
+  if (h1) {
+    const normalizedH1 =
+      normalizeWhitespace(h1)
+        .toLowerCase();
+
+    for (
+      let i = 0;
+      i < blocks.length;
+      i++
+    ) {
+      if (
+        blocks[i].text
+          .toLowerCase() ===
+        normalizedH1
+      ) {
+        /*
+         * Include a generous window after the program title.
+         */
+        for (
+          let j = Math.max(0, i - 3);
+          j <= Math.min(
+            blocks.length - 1,
+            i + 40
+          );
+          j++
+        ) {
+          interestingIndexes.add(j);
+        }
+
+        break;
+      }
+    }
+  }
+
+  /*
+   * Include context around known labels anywhere on the page.
+   */
+
+  for (
+    let i = 0;
+    i < blocks.length;
+    i++
+  ) {
+    if (
+      blocks[i].type === "label" ||
+      looksLikeKnownLabel(
+        blocks[i].text
+      )
+    ) {
+      for (
+        let j = Math.max(0, i - 2);
+        j <= Math.min(
+          blocks.length - 1,
+          i + 8
+        );
+        j++
+      ) {
+        interestingIndexes.add(j);
+      }
+    }
+  }
+
+  const selected =
+    [...interestingIndexes]
+      .sort((a, b) => a - b)
+      .map(index => ({
+        index,
+        ...blocks[index]
+      }));
+
+  /*
+   * If semantic selection found nothing useful, return the first
+   * blocks so we can diagnose the unfamiliar page.
+   */
+
+  if (!selected.length) {
+    return blocks
+      .slice(0, maxBlocks)
+      .map((block, index) => ({
+        index,
+        ...block
+      }));
+  }
+
+  return selected.slice(
+    0,
+    maxBlocks
+  );
+}
+
+
+/*
+ * ============================================================
  * API
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 export async function onRequestGet(context) {
@@ -531,7 +982,8 @@ export async function onRequestGet(context) {
   let parsedUrl;
 
   try {
-    parsedUrl = new URL(sourceUrl);
+    parsedUrl =
+      new URL(sourceUrl);
 
     if (
       !["http:", "https:"].includes(
@@ -583,11 +1035,14 @@ export async function onRequestGet(context) {
       await response.text();
 
     /*
-     * Future site profiles can normalize HTML here.
-     * Currently no site-specific behavior exists.
+     * Optional anomaly normalization.
+     *
+     * No profiles currently exist, so ordinary pages pass through
+     * unchanged.
      */
 
-    let normalizedHtml = html;
+    let normalizedHtml =
+      html;
 
     if (
       profile?.preExtract &&
@@ -597,6 +1052,13 @@ export async function onRequestGet(context) {
       normalizedHtml =
         profile.preExtract(html);
     }
+
+
+    /*
+     * ------------------------------
+     * Structured data
+     * ------------------------------
+     */
 
     const jsonLd =
       extractJsonLd(
@@ -617,10 +1079,12 @@ export async function onRequestGet(context) {
         summarizeSchemaEvent
       );
 
-    const pageText =
-      buildPageText(
-        normalizedHtml
-      );
+
+    /*
+     * ------------------------------
+     * Visible semantic content
+     * ------------------------------
+     */
 
     const h1 =
       extractH1(
@@ -631,6 +1095,35 @@ export async function onRequestGet(context) {
       extractTitleTag(
         normalizedHtml
       );
+
+    const semanticBlocks =
+      extractSemanticBlocks(
+        normalizedHtml
+      );
+
+    const diagnosticBlocks =
+      selectDiagnosticBlocks(
+        semanticBlocks,
+        h1
+      );
+
+    const links =
+      extractLinks(
+        normalizedHtml,
+        parsedUrl.toString()
+      );
+
+    const pageText =
+      buildPageText(
+        normalizedHtml
+      );
+
+
+    /*
+     * ------------------------------
+     * Response
+     * ------------------------------
+     */
 
     return Response.json({
       ok: true,
@@ -650,7 +1143,7 @@ export async function onRequestGet(context) {
         ),
 
       site_profile_applied:
-        profile ? true : false,
+        Boolean(profile),
 
       bytes_received:
         html.length,
@@ -661,25 +1154,40 @@ export async function onRequestGet(context) {
       schema_events_found:
         structuredEvents.length,
 
+      semantic_blocks_found:
+        semanticBlocks.length,
+
+      links_found:
+        links.length,
+
       page: {
         ...(h1
           ? { h1 }
           : {}),
 
         ...(titleTag
-          ? { title_tag: titleTag }
+          ? {
+              title_tag:
+                titleTag
+            }
           : {}),
 
         text_length:
           pageText.length,
 
         /*
-         * Diagnostic only.
-         * Don't return an enormous webpage.
+         * Smaller than Version 1 because semantic_blocks are now
+         * the more useful diagnostic.
          */
         text_preview:
-          pageText.slice(0, 5000)
+          pageText.slice(
+            0,
+            1500
+          )
       },
+
+      semantic_blocks:
+        diagnosticBlocks,
 
       structured_events:
         structuredEvents
