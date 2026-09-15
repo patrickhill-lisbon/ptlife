@@ -2,9 +2,7 @@ function findEvents(value, found = []) {
   if (!value || typeof value !== "object") return found;
 
   if (Array.isArray(value)) {
-    for (const item of value) {
-      findEvents(item, found);
-    }
+    for (const item of value) findEvents(item, found);
     return found;
   }
 
@@ -26,12 +24,41 @@ function findEvents(value, found = []) {
   return found;
 }
 
-export async function onRequestGet() {
-  const url =
-    "https://www.ccb.pt/en/evento/the-dog-days-are-over-2-0/2026-09-20/";
+export async function onRequestGet(context) {
+  const requestUrl = new URL(context.request.url);
+  const sourceUrl = requestUrl.searchParams.get("url");
+
+  if (!sourceUrl) {
+    return Response.json(
+      {
+        ok: false,
+        error: "Missing url parameter",
+        example: "/api/verify?url=https://example.com/event"
+      },
+      { status: 400 }
+    );
+  }
+
+  let parsedUrl;
 
   try {
-    const response = await fetch(url, {
+    parsedUrl = new URL(sourceUrl);
+
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      throw new Error("Unsupported protocol");
+    }
+  } catch {
+    return Response.json(
+      {
+        ok: false,
+        error: "Invalid URL"
+      },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const response = await fetch(parsedUrl.toString(), {
       headers: {
         "User-Agent": "WorthAGo/1.0"
       }
@@ -49,7 +76,7 @@ export async function onRequestGet() {
       try {
         jsonLd.push(JSON.parse(match[1].trim()));
       } catch {
-        // Ignore malformed JSON-LD blocks.
+        // Ignore malformed JSON-LD.
       }
     }
 
@@ -61,8 +88,12 @@ export async function onRequestGet() {
 
     const normalized = events.map(event => ({
       name: event.name ?? null,
+      description: event.description ?? null,
+
       start_at: event.startDate ?? null,
       end_at: event.endDate ?? null,
+
+      event_status: event.eventStatus ?? null,
 
       venue: event.location?.name ?? null,
 
@@ -74,15 +105,16 @@ export async function onRequestGet() {
         country: event.location?.address?.addressCountry ?? null
       },
 
-      source_url: event.url ?? url
+      event_url: event.url ?? null
     }));
 
     return Response.json({
       ok: response.ok,
       http_status: response.status,
       fetched_at: new Date().toISOString(),
-      source_url: url,
+      source_url: parsedUrl.toString(),
       extraction_method: "schema_org_json_ld",
+      json_ld_blocks_found: jsonLd.length,
       events_found: normalized.length,
       events: normalized
     });
@@ -91,7 +123,7 @@ export async function onRequestGet() {
     return Response.json(
       {
         ok: false,
-        source_url: url,
+        source_url: parsedUrl.toString(),
         error: error.message
       },
       { status: 500 }
