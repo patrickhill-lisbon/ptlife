@@ -11,17 +11,35 @@ export async function onRequestGet(context) {
 
     const html = await response.text();
 
+    const jsonLdBlocks = [];
+
+    const regex =
+      /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+
+    let match;
+
+    while ((match = regex.exec(html)) !== null) {
+      const raw = match[1].trim();
+
+      try {
+        jsonLdBlocks.push(JSON.parse(raw));
+      } catch {
+        jsonLdBlocks.push({
+          parse_error: true,
+          raw_preview: raw.slice(0, 500)
+        });
+      }
+    }
+
     return Response.json({
       ok: response.ok,
       status: response.status,
       source_url: url,
-      content_type: response.headers.get("content-type"),
       bytes_received: html.length,
-      contains_title: html
-        .toLowerCase()
-        .includes("the dog days are over"),
-      preview: html.slice(0, 500)
+      json_ld_blocks_found: jsonLdBlocks.length,
+      json_ld: jsonLdBlocks
     });
+
   } catch (error) {
     return Response.json(
       {
