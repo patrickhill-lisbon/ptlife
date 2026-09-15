@@ -447,5 +447,300 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     );
   }
+    // --------------------------------------------------
+  // REAL EVENTS FROM D1
+  // --------------------------------------------------
+
+  const realEventsContainer =
+    document.getElementById("real-events");
+
+
+  function formatEventDay(value) {
+    if (!value) {
+      return "";
+    }
+
+    const date = new Date(value);
+
+    return new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        day: "numeric",
+        month: "short",
+        timeZone: "Europe/Lisbon"
+      }
+    )
+      .format(date)
+      .toUpperCase();
+  }
+
+
+  function formatEventTime(value) {
+    if (!value) {
+      return "";
+    }
+
+    const date = new Date(value);
+
+    return new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+        timeZone: "Europe/Lisbon"
+      }
+    ).format(date);
+  }
+
+
+  function priceText(price) {
+    if (!price) {
+      return "";
+    }
+
+    if (
+      price.has_free_ticket &&
+      price.min_eur === 0 &&
+      price.max_eur === 0
+    ) {
+      return "FREE";
+    }
+
+    if (
+      price.min_eur == null &&
+      price.max_eur == null
+    ) {
+      return "";
+    }
+
+    if (
+      price.min_eur ===
+      price.max_eur
+    ) {
+      return `€${Number(
+        price.min_eur
+      ).toFixed(2)}`;
+    }
+
+    return (
+      `€${Number(price.min_eur).toFixed(2)}` +
+      `–€${Number(price.max_eur).toFixed(2)}`
+    );
+  }
+
+
+  function groupEventsByProgram(results) {
+    const programs = new Map();
+
+    results.forEach(event => {
+
+      if (!programs.has(event.program_id)) {
+        programs.set(
+          event.program_id,
+          {
+            ...event,
+            occurrences: []
+          }
+        );
+      }
+
+      programs
+        .get(event.program_id)
+        .occurrences
+        .push({
+          occurrence_id:
+            event.occurrence_id,
+
+          starts_at:
+            event.starts_at,
+
+          ends_at:
+            event.ends_at,
+
+          status:
+            event.status
+        });
+    });
+
+    return Array.from(
+      programs.values()
+    );
+  }
+
+
+  function renderRealEvents(events) {
+    if (!realEventsContainer) {
+      return;
+    }
+
+    realEventsContainer.innerHTML = "";
+
+    events.forEach(event => {
+
+      const first =
+        event.occurrences[0];
+
+      const last =
+        event.occurrences[
+          event.occurrences.length - 1
+        ];
+
+
+      const card =
+        document.createElement("a");
+
+      card.className =
+        "event-card real-event-card";
+
+      card.href =
+        event.url;
+
+
+      const eyebrow =
+        document.createElement("div");
+
+      eyebrow.className =
+        "event-date";
+
+
+      if (
+        first.starts_at !==
+        last.starts_at
+      ) {
+        eyebrow.textContent =
+          `${formatEventDay(first.starts_at)}–` +
+          `${formatEventDay(last.starts_at)}`;
+      } else {
+        eyebrow.textContent =
+          `${formatEventDay(first.starts_at)} · ` +
+          `${formatEventTime(first.starts_at)}`;
+      }
+
+
+      const title =
+        document.createElement("h3");
+
+      title.textContent =
+        event.title;
+
+
+      const venue =
+        document.createElement("div");
+
+      venue.className =
+        "event-location";
+
+      const venueParts = [];
+
+      if (event.venue?.name) {
+        venueParts.push(
+          event.venue.name
+        );
+      }
+
+      if (event.venue?.neighborhood) {
+        venueParts.push(
+          event.venue.neighborhood
+        );
+      }
+
+      venue.textContent =
+        venueParts.join(" · ");
+
+
+      const description =
+        document.createElement("p");
+
+      description.textContent =
+        event.description || "";
+
+
+      const footer =
+        document.createElement("div");
+
+      footer.className =
+        "event-status";
+
+
+      const details = [];
+
+      const price =
+        priceText(event.price);
+
+      if (price) {
+        details.push(price);
+      }
+
+      if (
+        event.occurrences.length > 1
+      ) {
+        details.push(
+          `${event.occurrences.length} performances`
+        );
+      }
+
+      footer.textContent =
+        details.join(" · ");
+
+
+      card.appendChild(eyebrow);
+      card.appendChild(title);
+
+      if (venue.textContent) {
+        card.appendChild(venue);
+      }
+
+      if (description.textContent) {
+        card.appendChild(description);
+      }
+
+      if (footer.textContent) {
+        card.appendChild(footer);
+      }
+
+
+      realEventsContainer.appendChild(
+        card
+      );
+    });
+  }
+
+
+  async function loadRealEvents() {
+    if (!realEventsContainer) {
+      return;
+    }
+
+    try {
+      const response =
+        await fetch("/api/events");
+
+      if (!response.ok) {
+        throw new Error(
+          "Unable to load events"
+        );
+      }
+
+      const data =
+        await response.json();
+
+      const grouped =
+        groupEventsByProgram(
+          data.results || []
+        );
+
+      renderRealEvents(grouped);
+
+    } catch (error) {
+      console.error(
+        "PTLife events:",
+        error
+      );
+    }
+  }
+
+
+  loadRealEvents();
 
 });
