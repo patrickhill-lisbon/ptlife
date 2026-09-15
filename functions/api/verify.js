@@ -35,53 +35,36 @@ function isEventType(type) {
   return false;
 }
 
-function findEvents(value, found = []) {
-  if (!value || typeof value !== "object") return found;
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      findEvents(item, found);
-    }
-    return found;
-  }
-
-  if (isEventType(value["@type"])) {
-    found.push(value);
-  }
-
-  for (const child of Object.values(value)) {
-    if (child && typeof child === "object") {
-      findEvents(child, found);
-    }
-  }
-
-  return found;
-}
-
 function getType(event) {
-  const type = event["@type"];
+  const type = event?.["@type"];
 
   if (Array.isArray(type)) {
-    return type.join(", ");
+    return type.find(t => EVENT_TYPES.has(t)) ?? type[0] ?? null;
   }
 
   return type ?? null;
 }
 
-function getVenue(location) {
-  if (!location) return null;
+function names(value) {
+  if (!value) return [];
 
-  if (Array.isArray(location)) {
-    return location[0]?.name ?? null;
-  }
+  const values = Array.isArray(value) ? value : [value];
 
-  return location.name ?? null;
+  return values
+    .map(item => {
+      if (typeof item === "string") return item;
+      return item?.name ?? null;
+    })
+    .filter(Boolean);
 }
 
-function getAddress(location) {
+function firstLocation(location) {
   if (!location) return null;
+  return Array.isArray(location) ? location[0] ?? null : location;
+}
 
-  const loc = Array.isArray(location) ? location[0] : location;
+function normalizeAddress(location) {
+  const loc = firstLocation(location);
   const address = loc?.address;
 
   if (!address || typeof address !== "object") {
@@ -97,17 +80,116 @@ function getAddress(location) {
   };
 }
 
-function names(value) {
-  if (!value) return [];
+function normalizeOccurrence(event, fallbackLocation = null) {
+  const location = event?.location ?? fallbackLocation;
+  const loc = firstLocation(location);
 
-  const values = Array.isArray(value) ? value : [value];
+  return {
+    start_at: event?.startDate ?? null,
+    end_at: event?.endDate ?? null,
+    event_status: event?.eventStatus ?? null,
+    venue: loc?.name ?? null,
+    address: normalizeAddress(location)
+  };
+}
 
-  return values
-    .map(item => {
-      if (typeof item === "string") return item;
-      return item?.name ?? null;
-    })
-    .filter(Boolean);
+function occurrenceKey(o) {
+  return [
+    o.start_at ?? "",
+    o.end_at ?? "",
+    o.venue ?? ""
+  ].join("|");
+}
+
+function findTopLevelEvents(value, found = [], insideEvent = false) {
+  if (!value || typeof value !== "object") return found;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      findTopLevelEvents(item, found, insideEvent);
+    }
+    return found;
+  }
+
+  const thisIsEvent = isEventType(value["@type"]);
+
+  if (thisIsEvent && !insideEvent) {
+    found.push(value);
+    return found;
+  }
+
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") {
+      findTopLevelEvents(
+        child,
+        found,
+        insideEvent || thisIsEvent
+      );
+    }
+  }
+
+  return found;
+}
+
+function normalizeProgram(event, sourceUrl) {
+  const occurrences = [];
+
+  // Parent event may itself represent an occurrence.
+  if (event.startDate || event.endDate) {
+    occurrences.push(
+      normalizeOccurrence(event, event.location)
+    );
+  }
+
+  // subEvent may contain one or more individual performances.
+  const subEvents = event.subEvent
+    ? Array.isArray(event.subEvent)
+      ? event.subEvent
+      : [event.subEvent]
+    : [];
+
+  for (const subEvent of subEvents) {
+    if (!isEventType(subEvent?.["@type"])) continue;
+
+    occurrences.push(
+      normalizeOccurrence(
+        subEvent,
+        event.location
+      )
+    );
+  }
+
+  // Remove exact duplicate occurrences.
+  const uniqueOccurrences = [];
+  const seen = new Set();
+
+  for (const occurrence of occurrences) {
+    const key = occurrenceKey(occurrence);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueOccurrences.push(occurrence);
+    }
+  }
+
+  return {
+    schema_type: getType(event),
+
+    title: event.name ?? null,
+    description: event.description ?? null,
+
+    organizer: names(event.organizer),
+    performers: names(event.performer),
+    sponsors: names(event.sponsor),
+    composers: names(event.composer),
+
+    age_range: event.typicalAgeRange ?? null,
+    keywords: event.keywords ?? null,
+
+    event_url: event.url ?? sourceUrl,
+
+    occurrences: uniqueOccurrences
+  };
 }
 
 export async function onRequestGet(context) {
@@ -159,8 +241,8 @@ export async function onRequestGet(context) {
         fetch_status:
           response.status === 403 ? "blocked" : "http_error",
         extraction_method: null,
-        events_found: 0,
-        events: []
+        programs_found: 0,
+        programs: []
       });
     }
 
@@ -180,47 +262,30 @@ export async function onRequestGet(context) {
       }
     }
 
-    const events = [];
+    const topLevelEvents = [];
 
     for (const block of jsonLd) {
-      findEvents(block, events);
+      findTopLevelEvents(block, topLevelEvents);
     }
 
-    const normalized = events.map(event => ({
-      schema_type: getType(event),
-
-      name: event.name ?? null,
-      description: event.description ?? null,
-
-      start_at: event.startDate ?? null,
-      end_at: event.endDate ?? null,
-
-      event_status: event.eventStatus ?? null,
-
-      venue: getVenue(event.location),
-      address: getAddress(event.location),
-
-      organizer: names(event.organizer),
-      performers: names(event.performer),
-      sponsors: names(event.sponsor),
-      composers: names(event.composer),
-
-      age_range: event.typicalAgeRange ?? null,
-      keywords: event.keywords ?? null,
-
-      event_url: event.url ?? parsedUrl.toString()
-    }));
+    const programs = topLevelEvents.map(event =>
+      normalizeProgram(event, parsedUrl.toString())
+    );
 
     return Response.json({
       ok: true,
       http_status: response.status,
       fetched_at: new Date().toISOString(),
       source_url: parsedUrl.toString(),
+
       extraction_method:
-        normalized.length > 0 ? "schema_org_json_ld" : null,
+        programs.length > 0
+          ? "schema_org_json_ld"
+          : null,
+
       json_ld_blocks_found: jsonLd.length,
-      events_found: normalized.length,
-      events: normalized
+      programs_found: programs.length,
+      programs
     });
 
   } catch (error) {
