@@ -532,17 +532,16 @@ function classifyElement(tag) {
     return "value";
   }
 
-  if (
-    lower === "p" ||
-    lower === "figcaption" ||
-    lower === "caption"
-  ) {
-    return "text";
+  if (lower === "time") {
+    return "time";
+  }
+
+  if (lower === "address") {
+    return "location";
   }
 
   return "text";
 }
-
 
 /*
  * Some labels frequently occur as short standalone blocks even
@@ -684,44 +683,88 @@ function dedupeAdjacentBlocks(blocks) {
 
 
 function extractSemanticBlocks(html) {
-  const cleaned =
-    removeNonContentHtml(html);
-
+  const cleaned = removeNonContentHtml(html);
   const blocks = [];
 
   /*
-   * Capture elements that naturally divide useful content.
+   * Elements that usually contain meaningful standalone content.
    *
-   * We intentionally avoid div/span here because capturing every
-   * nested container would create enormous duplication.
+   * We now include div/span/strong/etc., but only keep them when
+   * they are LEAF-LIKE: they must not contain another meaningful
+   * block element.
    */
+  const elementRegex =
+    /<(h[1-6]|p|li|dt|dd|figcaption|caption|div|span|strong|b|small|time|address)\b[^>]*>([\s\S]*?)<\/\1>/gi;
 
-  const blockRegex =
-    /<(h[1-6]|p|li|dt|dd|figcaption|caption)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  /*
+   * If one of these occurs inside a candidate element, the
+   * candidate is probably a wrapper rather than a leaf.
+   */
+  const childContentRegex =
+    /<(h[1-6]|p|li|dt|dd|figcaption|caption|div|section|article|ul|ol|table|tr|td|th)\b/i;
 
   let match;
 
-  while ((match = blockRegex.exec(cleaned)) !== null) {
-    const tag =
-      match[1].toLowerCase();
+  while ((match = elementRegex.exec(cleaned)) !== null) {
+    const tag = match[1].toLowerCase();
+    const innerHtml = match[2];
 
-    const text =
-      stripTags(match[2]);
+    /*
+     * For container-like elements, reject wrappers containing
+     * meaningful child structures.
+     *
+     * Ordinary semantic elements such as <p> and <h2> are kept.
+     */
+    if (
+      ["div", "span", "strong", "b", "small", "address"].includes(tag) &&
+      childContentRegex.test(innerHtml)
+    ) {
+      continue;
+    }
+
+    const text = stripTags(innerHtml);
 
     if (!text) continue;
 
     /*
-     * Very large blocks are often wrappers caused by invalid or
-     * unusual markup. Keep them for now but cap diagnostics later.
+     * Ignore tiny punctuation-only fragments.
      */
+    if (!/[\p{L}\p{N}€$£¥]/u.test(text)) {
+      continue;
+    }
 
-    let type =
-      classifyElement(tag);
-
+    /*
+     * Extremely long leaf blocks usually indicate unusual markup
+     * rather than a useful label/value.
+     */
     if (
-      type === "text" &&
-      looksLikeKnownLabel(text)
+      ["div", "span", "strong", "b", "small"].includes(tag) &&
+      text.length > 500
     ) {
+      continue;
+    }
+
+    let type = classifyElement(tag);
+
+    /*
+     * <time> has particularly useful semantics.
+     */
+    if (tag === "time") {
+      type = "time";
+    }
+
+    /*
+     * <address> is useful location context.
+     */
+    if (tag === "address") {
+      type = "location";
+    }
+
+    /*
+     * A short known phrase can function as a label regardless
+     * of whether the publisher used semantic HTML.
+     */
+    if (looksLikeKnownLabel(text)) {
       type = "label";
     }
 
@@ -732,9 +775,16 @@ function extractSemanticBlocks(html) {
     });
   }
 
+  /*
+   * Sort by actual document position.
+   *
+   * Because our regex scans different nested element types,
+   * document position matters more than element type.
+   *
+   * The temporary position value is removed afterward.
+   */
   return dedupeAdjacentBlocks(blocks);
 }
-
 
 /*
  * ============================================================
