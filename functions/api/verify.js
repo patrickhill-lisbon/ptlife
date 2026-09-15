@@ -2,7 +2,9 @@ function findEvents(value, found = []) {
   if (!value || typeof value !== "object") return found;
 
   if (Array.isArray(value)) {
-    for (const item of value) findEvents(item, found);
+    for (const item of value) {
+      findEvents(item, found);
+    }
     return found;
   }
 
@@ -76,7 +78,7 @@ export async function onRequestGet(context) {
       try {
         jsonLd.push(JSON.parse(match[1].trim()));
       } catch {
-        // Ignore malformed JSON-LD.
+        // Ignore malformed JSON-LD blocks.
       }
     }
 
@@ -113,8 +115,16 @@ export async function onRequestGet(context) {
       http_status: response.status,
       fetched_at: new Date().toISOString(),
       source_url: parsedUrl.toString(),
-      extraction_method: "schema_org_json_ld",
+
+      extraction_method:
+        events.length > 0 ? "schema_org_json_ld" : null,
+
       json_ld_blocks_found: jsonLd.length,
+
+      // Temporary diagnostic output.
+      // This lets us inspect what structured data the site provides.
+      json_ld: jsonLd,
+
       events_found: normalized.length,
       events: normalized
     });
@@ -123,7 +133,7 @@ export async function onRequestGet(context) {
     return Response.json(
       {
         ok: false,
-        source_url: parsedUrl.toString(),
+        source_url: parsedUrl?.toString() ?? sourceUrl,
         error: error.message
       },
       { status: 500 }
