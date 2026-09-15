@@ -1,4 +1,32 @@
-export async function onRequestGet(context) {
+function findEvents(value, found = []) {
+  if (!value || typeof value !== "object") return found;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      findEvents(item, found);
+    }
+    return found;
+  }
+
+  const type = value["@type"];
+
+  if (
+    type === "Event" ||
+    (Array.isArray(type) && type.includes("Event"))
+  ) {
+    found.push(value);
+  }
+
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") {
+      findEvents(child, found);
+    }
+  }
+
+  return found;
+}
+
+export async function onRequestGet() {
   const url =
     "https://www.ccb.pt/en/evento/the-dog-days-are-over-2-0/2026-09-20/";
 
@@ -11,33 +39,52 @@ export async function onRequestGet(context) {
 
     const html = await response.text();
 
-    const jsonLdBlocks = [];
-
     const regex =
       /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
 
+    const jsonLd = [];
     let match;
 
     while ((match = regex.exec(html)) !== null) {
-      const raw = match[1].trim();
-
       try {
-        jsonLdBlocks.push(JSON.parse(raw));
+        jsonLd.push(JSON.parse(match[1].trim()));
       } catch {
-        jsonLdBlocks.push({
-          parse_error: true,
-          raw_preview: raw.slice(0, 500)
-        });
+        // Ignore malformed JSON-LD blocks.
       }
     }
 
+    const events = [];
+
+    for (const block of jsonLd) {
+      findEvents(block, events);
+    }
+
+    const normalized = events.map(event => ({
+      name: event.name ?? null,
+      start_at: event.startDate ?? null,
+      end_at: event.endDate ?? null,
+
+      venue: event.location?.name ?? null,
+
+      address: {
+        street: event.location?.address?.streetAddress ?? null,
+        locality: event.location?.address?.addressLocality ?? null,
+        region: event.location?.address?.addressRegion ?? null,
+        postal_code: event.location?.address?.postalCode ?? null,
+        country: event.location?.address?.addressCountry ?? null
+      },
+
+      source_url: event.url ?? url
+    }));
+
     return Response.json({
       ok: response.ok,
-      status: response.status,
+      http_status: response.status,
+      fetched_at: new Date().toISOString(),
       source_url: url,
-      bytes_received: html.length,
-      json_ld_blocks_found: jsonLdBlocks.length,
-      json_ld: jsonLdBlocks
+      extraction_method: "schema_org_json_ld",
+      events_found: normalized.length,
+      events: normalized
     });
 
   } catch (error) {
