@@ -341,17 +341,69 @@ export async function syncProviderOccurrences({
           Date.now();
 
 
-        const fetched =
-          await fetchOccurrences(
-            program.externalId
-          );
+        /*
+         * Give provider-fetch errors enough context to tell
+         * us exactly which provider program failed.
+         */
+
+        let fetched;
 
 
-        const normalized =
-          normalizeOccurrences(
-            program.externalId,
-            fetched.data
+        try {
+          fetched =
+            await fetchOccurrences(
+              program.externalId
+            );
+        } catch (error) {
+          throw new Error(
+            "Provider occurrence fetch failed for " +
+            providerKey +
+            " program " +
+            program.programId +
+            ' "' +
+            program.title +
+            '" (' +
+            program.externalId +
+            "): " +
+            (
+              error?.message ||
+              String(error)
+            )
           );
+        }
+
+
+        /*
+         * Keep normalization failures distinct from network
+         * or provider-fetch failures.
+         */
+
+        let normalized;
+
+
+        try {
+          normalized =
+            normalizeOccurrences(
+              program.externalId,
+              fetched.data
+            );
+        } catch (error) {
+          throw new Error(
+            "Provider occurrence normalization failed for " +
+            providerKey +
+            " program " +
+            program.programId +
+            ' "' +
+            program.title +
+            '" (' +
+            program.externalId +
+            "): " +
+            (
+              error?.message ||
+              String(error)
+            )
+          );
+        }
 
 
         return {
