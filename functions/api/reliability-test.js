@@ -1,26 +1,24 @@
 /*
- * PTLife Reliability Framework — Test Endpoint
+ * PTLife Reliability Framework — Test Endpoint v2
  *
  * Diagnostic only.
  *
- * Purpose:
- *   Verify that the central reliability framework:
+ * Modes:
  *
- *   1. catches an exception
- *   2. creates an error ID
- *   3. stores the error in D1
- *   4. records stack/source information
- *   5. updates provider_health
- *   6. returns a graceful JSON response
+ *   /api/reliability-test
+ *       Deliberately fails.
  *
- * This endpoint deliberately throws a harmless test error.
- * It does NOT modify PTLife event/program/place data.
+ *   /api/reliability-test?mode=success
+ *       Simulates successful provider recovery.
+ *
+ * No PTLife event/program/place data is modified.
  */
 
 import {
   logError,
   markProviderAttempt,
-  markProviderFailure
+  markProviderFailure,
+  markProviderSuccess
 } from "../lib/reliability.js";
 
 
@@ -42,32 +40,148 @@ function jsonResponse(data, status = 200) {
 
 
 export async function onRequestGet(context) {
-  const db = context.env.DB;
+  const db =
+    context.env.DB;
+
+  const url =
+    new URL(context.request.url);
+
+  const mode =
+    (
+      url.searchParams.get("mode") ||
+      "failure"
+    ).toLowerCase();
 
   const provider =
     "reliability_test";
-
-  const operation =
-    "deliberate_test_failure";
 
   const startedAt =
     Date.now();
 
 
   /*
-   * --------------------------------------------------
+   * ==================================================
    * OUTER SAFETY NET
+   * ==================================================
    *
-   * Even the reliability test itself should return
-   * useful JSON rather than an unexplained 500/502.
-   * --------------------------------------------------
+   * If the reliability framework itself fails,
+   * return useful diagnostic JSON instead of allowing
+   * an unexplained Cloudflare failure.
    */
 
   try {
 
     /*
-     * Record that this provider operation began.
+     * =================================================
+     * SUCCESS / RECOVERY TEST
+     * =================================================
      */
+
+    if (mode === "success") {
+
+      const operation =
+        "deliberate_test_success";
+
+
+      await markProviderAttempt(
+        db,
+        provider,
+        operation
+      );
+
+
+      const durationMs =
+        Date.now() - startedAt;
+
+
+      const recovery =
+        await markProviderSuccess(
+          db,
+          provider,
+          {
+            operation,
+
+            durationMs,
+
+            httpStatus: 200,
+
+            itemCount: 42,
+
+            metadata: {
+              diagnostic:
+                true,
+
+              simulated_items:
+                42,
+
+              note:
+                "Deliberate successful run used to test PTLife provider recovery."
+            }
+          }
+        );
+
+
+      return jsonResponse({
+        ok: true,
+
+        graceful_success:
+          true,
+
+        diagnostic_test:
+          true,
+
+        message:
+          recovery.recovered
+            ? "The provider recovered successfully and its open errors were resolved."
+            : "The provider completed successfully.",
+
+        provider: {
+          name:
+            provider,
+
+          operation,
+
+          status:
+            "healthy"
+        },
+
+        recovery: {
+          recovered:
+            recovery.recovered,
+
+          previous_failures:
+            recovery.previousFailures,
+
+          previous_error_id:
+            recovery.previousErrorId,
+
+          resolved_error_count:
+            recovery.resolvedErrorCount
+        },
+
+        simulated_result: {
+          item_count: 42,
+          http_status: 200
+        },
+
+        duration_ms:
+          durationMs,
+
+        next_step:
+          "Inspect provider_health and system_errors in D1."
+      });
+    }
+
+
+    /*
+     * =================================================
+     * FAILURE TEST
+     * =================================================
+     */
+
+    const operation =
+      "deliberate_test_failure";
+
 
     await markProviderAttempt(
       db,
@@ -79,11 +193,7 @@ export async function onRequestGet(context) {
     try {
 
       /*
-       * ------------------------------------------------
-       * DELIBERATE ERROR
-       *
-       * This is intentional.
-       * ------------------------------------------------
+       * Deliberately fail.
        */
 
       throw new Error(
@@ -96,10 +206,6 @@ export async function onRequestGet(context) {
       const durationMs =
         Date.now() - startedAt;
 
-
-      /*
-       * Store the diagnostic error.
-       */
 
       const logged =
         await logError(
@@ -115,6 +221,17 @@ export async function onRequestGet(context) {
 
             severity:
               "error",
+
+            /*
+             * Logical source location.
+             *
+             * This is the filename we recognize
+             * in GitHub, rather than Cloudflare's
+             * generated bundle filename.
+             */
+
+            sourceFile:
+              "functions/api/reliability-test.js",
 
             requestMethod:
               context.request.method,
@@ -147,10 +264,6 @@ export async function onRequestGet(context) {
         );
 
 
-      /*
-       * Update provider health.
-       */
-
       await markProviderFailure(
         db,
         provider,
@@ -161,16 +274,6 @@ export async function onRequestGet(context) {
         }
       );
 
-
-      /*
-       * IMPORTANT:
-       *
-       * The operation failed internally, but the
-       * endpoint itself responds normally.
-       *
-       * That is the graceful-failure behavior we
-       * eventually want for provider jobs.
-       */
 
       return jsonResponse({
         ok: false,
@@ -209,7 +312,7 @@ export async function onRequestGet(context) {
           durationMs,
 
         next_step:
-          "Inspect the D1 system_errors and provider_health tables."
+          "Run ?mode=success to test automatic provider recovery."
       });
     }
 
@@ -217,12 +320,12 @@ export async function onRequestGet(context) {
   } catch (frameworkError) {
 
     /*
-     * If we arrive here, the reliability framework
-     * itself failed.
+     * =================================================
+     * FRAMEWORK FAILURE
+     * =================================================
      *
-     * We cannot safely rely on D1 logging at this
-     * point, so return the framework error directly
-     * as diagnostic JSON.
+     * Do not try to log this through the framework,
+     * because the framework itself may be what failed.
      */
 
     return jsonResponse(
@@ -247,7 +350,7 @@ export async function onRequestGet(context) {
           null,
 
         warning:
-          "The test error was not handled successfully by the reliability framework."
+          "The reliability framework itself encountered an error."
       },
       500
     );
