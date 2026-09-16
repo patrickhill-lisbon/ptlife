@@ -1,11 +1,22 @@
 /*
- * PTLife — Cinemas NOS End-to-End Test v3
+ * PTLife — Cinemas NOS Colombo Schedule Test v4
  *
  * Diagnostic only.
  *
  * Purpose:
- *   Run the real NOS catalogue → sessions pipeline
- *   through PTLife's safeRun reliability framework.
+ *   Determine whether PTLife can build a complete schedule
+ *   for one NOS cinema using the proven NOS APIs.
+ *
+ * Test cinema:
+ *   Cinemas NOS Colombo
+ *
+ * Method:
+ *   1. Fetch current NOS movie catalogue.
+ *   2. Find aggregate movie IDs.
+ *   3. Fetch session data for every movie.
+ *   4. Run requests in controlled batches.
+ *   5. Keep only Colombo sessions.
+ *   6. Report timing and failures.
  *
  * IMPORTANT:
  *   - NO program writes
@@ -32,6 +43,25 @@ const SESSIONS_BASE =
   "getMovieSessions.getMovieSessionsAggregator.json";
 
 
+/*
+ * Known from the NOS theatre list.
+ */
+
+const TARGET_THEATER = {
+  uuid:
+    "e0ea3044-4a1b-46b1-bca2-69fd8eae16d7",
+
+  name:
+    "Cinemas NOS Colombo",
+
+  city:
+    "Lisboa"
+};
+
+
+const BATCH_SIZE = 5;
+
+
 // ============================================================
 // RESPONSE
 // ============================================================
@@ -41,6 +71,7 @@ function respond(data, status = 200) {
     JSON.stringify(data, null, 2),
     {
       status,
+
       headers: {
         "content-type":
           "application/json; charset=utf-8",
@@ -92,7 +123,11 @@ function providerError(
 // ============================================================
 
 async function getJson(url) {
+  const startedAt =
+    Date.now();
+
   let response;
+
 
   try {
     response =
@@ -124,6 +159,9 @@ async function getJson(url) {
   const text =
     await response.text();
 
+  const durationMs =
+    Date.now() - startedAt;
+
 
   if (!response.ok) {
     throw providerError(
@@ -138,6 +176,9 @@ async function getJson(url) {
         details: {
           url,
 
+          duration_ms:
+            durationMs,
+
           preview:
             text.slice(0, 1000)
         }
@@ -147,6 +188,7 @@ async function getJson(url) {
 
 
   let data;
+
 
   try {
     data =
@@ -164,6 +206,9 @@ async function getJson(url) {
         details: {
           url,
 
+          duration_ms:
+            durationMs,
+
           preview:
             text.slice(0, 1000)
         }
@@ -176,13 +221,15 @@ async function getJson(url) {
     status:
       response.status,
 
+    durationMs,
+
     data
   };
 }
 
 
 // ============================================================
-// NOS MOVIE HELPERS
+// MOVIE HELPERS
 // ============================================================
 
 function findMovies(data) {
@@ -281,16 +328,394 @@ function getTitle(movie) {
 
 
 // ============================================================
-// NOS PIPELINE
+// THEATER MATCHING
 // ============================================================
 
-async function runNosDiagnostic() {
+function getTheaterId(theater) {
+  return (
+    theater?.theaterId ||
+    theater?.theaterID ||
+    theater?.uuid ||
+    null
+  );
+}
+
+
+function isTargetTheater(theater) {
+  const id =
+    getTheaterId(theater);
+
+
+  /*
+   * UUID is our primary match.
+   */
+
+  if (
+    id === TARGET_THEATER.uuid
+  ) {
+    return true;
+  }
+
+
+  /*
+   * Name fallback is useful diagnostically in case NOS
+   * changes the identifier field in the session response.
+   */
+
+  const name =
+    String(
+      theater?.name || ""
+    )
+      .trim()
+      .toLowerCase();
+
+
+  return (
+    name ===
+    TARGET_THEATER.name
+      .toLowerCase()
+  );
+}
+
+
+// ============================================================
+// FETCH ONE MOVIE'S SESSIONS
+// ============================================================
+
+async function fetchMovieSessions(movie) {
+  const aggregateId =
+    getAggregateId(movie);
+
+  const title =
+    getTitle(movie);
+
+
+  if (!aggregateId) {
+    return {
+      ok: false,
+
+      title,
+
+      movie_uuid:
+        valueByName(
+          movie,
+          "uuid"
+        ),
+
+      aggregate_movie_id:
+        null,
+
+      error:
+        "aggregate_movie_id_missing"
+    };
+  }
+
+
+  const sessionsUrl =
+    SESSIONS_BASE +
+    "?aggregateMovieId=" +
+    encodeURIComponent(
+      aggregateId
+    );
+
+
+  try {
+    const response =
+      await getJson(
+        sessionsUrl
+      );
+
+
+    if (
+      !Array.isArray(
+        response.data?.days
+      )
+    ) {
+      return {
+        ok: false,
+
+        title,
+
+        movie_uuid:
+          valueByName(
+            movie,
+            "uuid"
+          ),
+
+        aggregate_movie_id:
+          aggregateId,
+
+        duration_ms:
+          response.durationMs,
+
+        error:
+          "days_array_missing",
+
+        response_fields:
+          Object.keys(
+            response.data || {}
+          )
+      };
+    }
+
+
+    return {
+      ok: true,
+
+      title,
+
+      movie_uuid:
+        valueByName(
+          movie,
+          "uuid"
+        ),
+
+      aggregate_movie_id:
+        aggregateId,
+
+      duration_ms:
+        response.durationMs,
+
+      days:
+        response.data.days
+    };
+
+
+  } catch (error) {
+    return {
+      ok: false,
+
+      title,
+
+      movie_uuid:
+        valueByName(
+          movie,
+          "uuid"
+        ),
+
+      aggregate_movie_id:
+        aggregateId,
+
+      error:
+        error?.message ||
+        String(error),
+
+      stage:
+        error?.providerStage ||
+        null,
+
+      http_status:
+        error?.httpStatus ||
+        null
+    };
+  }
+}
+
+
+// ============================================================
+// BATCH RUNNER
+// ============================================================
+
+async function fetchInBatches(
+  movies,
+  batchSize
+) {
+  const results = [];
+
+
+  for (
+    let index = 0;
+    index < movies.length;
+    index += batchSize
+  ) {
+    const batch =
+      movies.slice(
+        index,
+        index + batchSize
+      );
+
+
+    const batchResults =
+      await Promise.all(
+        batch.map(
+          fetchMovieSessions
+        )
+      );
+
+
+    results.push(
+      ...batchResults
+    );
+  }
+
+
+  return results;
+}
+
+
+// ============================================================
+// NORMALIZE COLOMBO SESSIONS
+// ============================================================
+
+function collectTargetSessions(
+  movieResults
+) {
+  const sessions = [];
+
+  const moviesAtTheater =
+    new Map();
+
+
+  for (
+    const movieResult
+    of movieResults
+  ) {
+    if (!movieResult.ok) {
+      continue;
+    }
+
+
+    for (
+      const day
+      of movieResult.days
+    ) {
+      const theaters =
+        Array.isArray(
+          day?.theaters
+        )
+          ? day.theaters
+          : [];
+
+
+      for (
+        const theater
+        of theaters
+      ) {
+        if (
+          !isTargetTheater(
+            theater
+          )
+        ) {
+          continue;
+        }
+
+
+        const theaterSessions =
+          Array.isArray(
+            theater?.sessions
+          )
+            ? theater.sessions
+            : [];
+
+
+        if (
+          theaterSessions.length >
+          0
+        ) {
+          moviesAtTheater.set(
+            movieResult.aggregate_movie_id,
+            movieResult.title
+          );
+        }
+
+
+        for (
+          const session
+          of theaterSessions
+        ) {
+          sessions.push({
+            movie:
+              movieResult.title,
+
+            movie_uuid:
+              movieResult.movie_uuid,
+
+            aggregate_movie_id:
+              movieResult
+                .aggregate_movie_id,
+
+            day_name:
+              day?.name ||
+              null,
+
+            theater:
+              theater?.name ||
+              TARGET_THEATER.name,
+
+            theater_id:
+              getTheaterId(
+                theater
+              ),
+
+            session_uuid:
+              session?.uuid ||
+              null,
+
+            time:
+              session?.time ||
+              null,
+
+            operational_date:
+              session
+                ?.operationalDate ||
+              null,
+
+            room:
+              session?.room ||
+              session?.roomName ||
+              session?.screen ||
+              null,
+
+            type:
+              session?.type ||
+              null,
+
+            description:
+              session
+                ?.description ||
+              null,
+
+            format:
+              session?.format ||
+              null,
+
+            version:
+              session?.version ||
+              null
+          });
+        }
+      }
+    }
+  }
+
+
+  return {
+    sessions,
+
+    movieCount:
+      moviesAtTheater.size
+  };
+}
+
+
+// ============================================================
+// MAIN NOS DIAGNOSTIC
+// ============================================================
+
+async function runNosColomboDiagnostic() {
+  const totalStartedAt =
+    Date.now();
+
 
   /*
    * --------------------------------------------------------
-   * STEP 1 — MOVIE CATALOGUE
+   * STEP 1 — CATALOGUE
    * --------------------------------------------------------
    */
+
+  const catalogueStartedAt =
+    Date.now();
+
 
   const catalogue =
     await getJson(
@@ -298,11 +723,10 @@ async function runNosDiagnostic() {
     );
 
 
-  /*
-   * --------------------------------------------------------
-   * STEP 2 — LOCATE MOVIE ARRAY
-   * --------------------------------------------------------
-   */
+  const catalogueStageMs =
+    Date.now() -
+    catalogueStartedAt;
+
 
   const movies =
     findMovies(
@@ -318,16 +742,9 @@ async function runNosDiagnostic() {
           "catalogue_schema",
 
         details: {
-          data_fields:
+          fields:
             Object.keys(
               catalogue.data ||
-              {}
-            ),
-
-          inner_data_fields:
-            Object.keys(
-              catalogue.data
-                ?.data ||
               {}
             )
         }
@@ -349,106 +766,83 @@ async function runNosDiagnostic() {
 
   /*
    * --------------------------------------------------------
-   * STEP 3 — FIND FIRST MOVIE WITH AGGREGATE ID
+   * STEP 2 — SESSION REQUESTS
    * --------------------------------------------------------
    */
 
-  let selected = null;
-  let aggregateId = null;
+  const sessionStageStartedAt =
+    Date.now();
 
 
-  for (const movie of movies) {
-    const id =
-      getAggregateId(movie);
-
-    if (id) {
-      selected =
-        movie;
-
-      aggregateId =
-        id;
-
-      break;
-    }
-  }
+  const movieResults =
+    await fetchInBatches(
+      movies,
+      BATCH_SIZE
+    );
 
 
-  if (!selected) {
+  const sessionStageMs =
+    Date.now() -
+    sessionStageStartedAt;
+
+
+  /*
+   * --------------------------------------------------------
+   * STEP 3 — ANALYZE REQUEST RESULTS
+   * --------------------------------------------------------
+   */
+
+  const successfulRequests =
+    movieResults.filter(
+      result => result.ok
+    );
+
+
+  const failedRequests =
+    movieResults.filter(
+      result => !result.ok
+    );
+
+
+  /*
+   * --------------------------------------------------------
+   * STEP 4 — EXTRACT COLOMBO
+   * --------------------------------------------------------
+   */
+
+  const target =
+    collectTargetSessions(
+      movieResults
+    );
+
+
+  /*
+   * A cinema legitimately might have zero sessions at some
+   * future point, so don't automatically classify that as
+   * provider failure.
+   *
+   * But if EVERY movie session request failed, the provider
+   * clearly did not work.
+   */
+
+  if (
+    successfulRequests.length ===
+    0
+  ) {
     throw providerError(
-      "NOS movie aggregate ID was not found",
+      "All NOS movie session requests failed",
       {
         stage:
-          "aggregate_id",
+          "sessions_all_failed",
 
         details: {
           movie_count:
             movies.length,
 
-          first_movie_fields:
-            Object.keys(
-              movies[0] ||
-              {}
-            ),
-
-          first_movie:
-            movies[0] ||
-            null
-        }
-      }
-    );
-  }
-
-
-  /*
-   * --------------------------------------------------------
-   * STEP 4 — FETCH SESSIONS
-   * --------------------------------------------------------
-   */
-
-  const sessionsUrl =
-    SESSIONS_BASE +
-    "?aggregateMovieId=" +
-    encodeURIComponent(
-      aggregateId
-    );
-
-
-  const sessionResult =
-    await getJson(
-      sessionsUrl
-    );
-
-
-  /*
-   * --------------------------------------------------------
-   * STEP 5 — READ SESSION STRUCTURE
-   * --------------------------------------------------------
-   */
-
-  if (
-    !Array.isArray(
-      sessionResult.data?.days
-    )
-  ) {
-    throw providerError(
-      "NOS sessions response does not contain a days array",
-      {
-        stage:
-          "sessions_schema",
-
-        details: {
-          movie:
-            getTitle(
-              selected
-            ),
-
-          aggregate_movie_id:
-            aggregateId,
-
-          session_fields:
-            Object.keys(
-              sessionResult.data ||
-              {}
+          failures:
+            failedRequests.slice(
+              0,
+              10
             )
         }
       }
@@ -456,221 +850,83 @@ async function runNosDiagnostic() {
   }
 
 
-  const days =
-    sessionResult.data.days;
+  /*
+   * --------------------------------------------------------
+   * TIMING STATISTICS
+   * --------------------------------------------------------
+   */
 
-
-  if (days.length === 0) {
-    throw providerError(
-      "NOS returned no session days for the selected movie",
-      {
-        stage:
-          "sessions_empty",
-
-        details: {
-          movie:
-            getTitle(
-              selected
-            ),
-
-          aggregate_movie_id:
-            aggregateId
-        }
-      }
-    );
-  }
-
-
-  let theaterAppearances = 0;
-  let sessionCount = 0;
-
-  const theaters =
-    new Map();
-
-  const samples = [];
-
-
-  for (const day of days) {
-
-    const dayTheaters =
-      Array.isArray(
-        day?.theaters
+  const requestDurations =
+    successfulRequests
+      .map(
+        result =>
+          result.duration_ms
       )
-        ? day.theaters
-        : [];
+      .filter(
+        value =>
+          Number.isFinite(
+            value
+          )
+      );
 
 
-    theaterAppearances +=
-      dayTheaters.length;
-
-
-    for (
-      const theater
-      of dayTheaters
-    ) {
-
-      const theaterId =
-        theater?.theaterId ||
-        theater?.theaterID ||
-        theater?.name;
-
-
-      if (!theaterId) {
-        continue;
-      }
-
-
-      if (
-        !theaters.has(
-          theaterId
-        )
-      ) {
-        theaters.set(
-          theaterId,
-          {
-            name:
-              theater?.name ||
-              null,
-
-            theater_id:
-              theater
-                ?.theaterId ||
-              theater
-                ?.theaterID ||
-              null,
-
-            region_id:
-              theater
-                ?.regionId ||
-              theater
-                ?.regionID ||
-              null,
-
-            location:
-              theater
-                ?.location ||
-              null
-          }
-        );
-      }
-
-
-      const sessions =
-        Array.isArray(
-          theater?.sessions
-        )
-          ? theater.sessions
-          : [];
-
-
-      sessionCount +=
-        sessions.length;
-
-
-      for (
-        const session
-        of sessions
-      ) {
-
-        if (
-          samples.length >=
-          20
-        ) {
-          continue;
-        }
-
-
-        samples.push({
-          day:
-            day?.name ||
-            null,
-
-          theater:
-            theater?.name ||
-            null,
-
-          theater_id:
-            theater
-              ?.theaterId ||
-            theater
-              ?.theaterID ||
-            null,
-
-          session_uuid:
-            session?.uuid ||
-            null,
-
-          time:
-            session?.time ||
-            null,
-
-          operational_date:
-            session
-              ?.operationalDate ||
-            null,
-
-          type:
-            session?.type ||
-            null,
-
-          description:
-            session
-              ?.description ||
-            null,
-
-          format:
-            session?.format ||
-            null,
-
-          version:
-            session?.version ||
-            null
-        });
-      }
-    }
-  }
-
-
-  /*
-   * A valid-looking response with zero sessions should
-   * still be considered a failure for this diagnostic.
-   *
-   * Otherwise a NOS schema/content problem could be
-   * mistaken for a healthy provider.
-   */
-
-  if (sessionCount === 0) {
-    throw providerError(
-      "NOS returned zero sessions for the selected movie",
-      {
-        stage:
-          "session_count_zero",
-
-        details: {
+  const slowestRequests =
+    [...successfulRequests]
+      .filter(
+        result =>
+          Number.isFinite(
+            result.duration_ms
+          )
+      )
+      .sort(
+        (a, b) =>
+          b.duration_ms -
+          a.duration_ms
+      )
+      .slice(0, 10)
+      .map(
+        result => ({
           movie:
-            getTitle(
-              selected
-            ),
+            result.title,
 
-          aggregate_movie_id:
-            aggregateId,
+          duration_ms:
+            result.duration_ms
+        })
+      );
 
-          days:
-            days.length,
 
-          theater_appearances:
-            theaterAppearances
-        }
-      }
-    );
-  }
+  const averageRequestMs =
+    requestDurations.length
+      ? Math.round(
+          requestDurations.reduce(
+            (sum, value) =>
+              sum + value,
+            0
+          ) /
+          requestDurations.length
+        )
+      : null;
 
 
   /*
-   * --------------------------------------------------------
-   * SUCCESS RESULT
-   * --------------------------------------------------------
+   * Sort schedule primarily by operational date and time.
    */
+
+  target.sessions.sort(
+    (a, b) => {
+      const aKey =
+        `${a.operational_date || ""} ${a.time || ""}`;
+
+      const bKey =
+        `${b.operational_date || ""} ${b.time || ""}`;
+
+
+      return aKey.localeCompare(
+        bKey
+      );
+    }
+  );
+
 
   return {
     fetched_at:
@@ -680,70 +936,94 @@ async function runNosDiagnostic() {
     writes_to_d1:
       false,
 
+    target_theater:
+      TARGET_THEATER,
+
+    configuration: {
+      batch_size:
+        BATCH_SIZE
+    },
+
     catalogue: {
-      status:
+      http_status:
         catalogue.status,
 
       movie_count:
-        movies.length
+        movies.length,
+
+      movies_with_aggregate_id:
+        movies.filter(
+          movie =>
+            Boolean(
+              getAggregateId(
+                movie
+              )
+            )
+        ).length
     },
 
-    selected_movie: {
-      title:
-        getTitle(
-          selected
-        ),
+    requests: {
+      attempted:
+        movieResults.length,
 
-      uuid:
-        valueByName(
-          selected,
-          "uuid"
-        ),
+      successful:
+        successfulRequests.length,
 
-      aggregate_movie_id:
-        aggregateId,
+      failed:
+        failedRequests.length,
 
-      fields:
-        Object.keys(
-          selected
+      failures:
+        failedRequests.map(
+          result => ({
+            movie:
+              result.title,
+
+            aggregate_movie_id:
+              result
+                .aggregate_movie_id,
+
+            error:
+              result.error,
+
+            stage:
+              result.stage ||
+              null,
+
+            http_status:
+              result.http_status ||
+              null
+          })
         )
     },
 
-    sessions_request: {
-      status:
-        sessionResult.status,
-
-      url:
-        sessionsUrl
-    },
-
-    result: {
-      days:
-        days.length,
-
-      unique_theaters:
-        theaters.size,
-
-      theater_appearances:
-        theaterAppearances,
+    colombo: {
+      movies:
+        target.movieCount,
 
       sessions:
-        sessionCount
+        target.sessions.length,
+
+      schedule:
+        target.sessions
     },
 
-    theaters:
-      Array.from(
-        theaters.values()
-      ),
+    timing: {
+      catalogue_ms:
+        catalogueStageMs,
 
-    session_sample:
-      samples,
+      sessions_stage_ms:
+        sessionStageMs,
 
-    raw_session_fields:
-      Object.keys(
-        sessionResult.data ||
-        {}
-      )
+      total_pipeline_ms:
+        Date.now() -
+        totalStartedAt,
+
+      average_session_request_ms:
+        averageRequestMs,
+
+      slowest_session_requests:
+        slowestRequests
+    }
   };
 }
 
@@ -759,17 +1039,6 @@ export async function onRequestGet(
     context.env.DB;
 
 
-  /*
-   * safeRun handles:
-   *
-   *   provider attempt
-   *   success
-   *   failure
-   *   duplicate errors
-   *   recovery
-   *   provider health
-   */
-
   let result;
 
 
@@ -782,7 +1051,7 @@ export async function onRequestGet(
           "cinemas_nos",
 
         operation:
-          "catalogue_to_sessions_diagnostic",
+          "colombo_full_schedule_diagnostic",
 
         sourceFile:
           "functions/api/nos-test.js",
@@ -802,40 +1071,51 @@ export async function onRequestGet(
           diagnostic:
             true,
 
-          writes_to_content_tables:
-            false,
+          target_theater:
+            TARGET_THEATER.name,
 
-          movie_catalogue_url:
-            MOVIES_URL
+          target_theater_uuid:
+            TARGET_THEATER.uuid,
+
+          batch_size:
+            BATCH_SIZE,
+
+          writes_to_content_tables:
+            false
         },
 
         run:
-          runNosDiagnostic,
-
-        /*
-         * This is a second safety check after the
-         * provider-specific validation above.
-         */
+          runNosColomboDiagnostic,
 
         validate: data => {
           if (
             !data ||
-            !data.result
+            !data.catalogue ||
+            !data.requests ||
+            !data.colombo
           ) {
             throw new Error(
-              "NOS diagnostic result is missing"
+              "NOS Colombo diagnostic returned an incomplete result"
             );
           }
 
 
           if (
-            !Number.isFinite(
-              data.result.sessions
-            ) ||
-            data.result.sessions <= 0
+            data.catalogue
+              .movie_count <= 0
           ) {
             throw new Error(
-              "NOS diagnostic produced no usable sessions"
+              "NOS Colombo diagnostic returned no movies"
+            );
+          }
+
+
+          if (
+            data.requests
+              .successful <= 0
+          ) {
+            throw new Error(
+              "NOS Colombo diagnostic had no successful session requests"
             );
           }
 
@@ -845,69 +1125,71 @@ export async function onRequestGet(
 
         getItemCount:
           data =>
-            data?.result
+            data?.colombo
               ?.sessions ??
             null,
 
         getMetadata:
           data => ({
-            movie_count:
+            target_theater:
+              TARGET_THEATER.name,
+
+            catalogue_movies:
               data?.catalogue
                 ?.movie_count ??
               null,
 
-            selected_movie:
-              data
-                ?.selected_movie
-                ?.title ??
+            request_successes:
+              data?.requests
+                ?.successful ??
               null,
 
-            days:
-              data?.result
-                ?.days ??
+            request_failures:
+              data?.requests
+                ?.failed ??
               null,
 
-            unique_theaters:
-              data?.result
-                ?.unique_theaters ??
+            theater_movies:
+              data?.colombo
+                ?.movies ??
               null,
 
-            sessions:
-              data?.result
+            theater_sessions:
+              data?.colombo
                 ?.sessions ??
+              null,
+
+            pipeline_ms:
+              data?.timing
+                ?.total_pipeline_ms ??
               null
           }),
 
         fallbackData: {
-          fetched_at:
-            new Date()
-              .toISOString(),
+          target_theater:
+            TARGET_THEATER,
 
-          writes_to_d1:
-            false,
-
-          result: {
-            days: 0,
-            unique_theaters: 0,
-            theater_appearances: 0,
-            sessions: 0
+          catalogue: {
+            movie_count: 0
           },
 
-          theaters: [],
+          requests: {
+            attempted: 0,
+            successful: 0,
+            failed: 0,
+            failures: []
+          },
 
-          session_sample: []
+          colombo: {
+            movies: 0,
+            sessions: 0,
+            schedule: []
+          }
         }
       });
 
 
   } catch (frameworkError) {
-
-    /*
-     * safeRun itself failed.
-     *
-     * This is different from NOS failing.
-     */
-
     return respond(
       {
         ok: false,
@@ -936,16 +1218,7 @@ export async function onRequestGet(
 
 
   /*
-   * --------------------------------------------------------
-   * GRACEFUL NOS FAILURE
-   * --------------------------------------------------------
-   *
-   * Deliberately return HTTP 200 from this diagnostic
-   * endpoint even when NOS failed.
-   *
-   * The JSON tells us the provider failed; Cloudflare
-   * does not replace the useful diagnostic with a
-   * generic gateway-error page.
+   * NOS failure itself remains graceful.
    */
 
   if (!result.ok) {
@@ -971,19 +1244,10 @@ export async function onRequestGet(
         result.data,
 
       message:
-        "The NOS diagnostic failed, but PTLife handled the failure without crashing.",
-
-      next_step:
-        "Inspect system_errors and provider_health using the returned error ID."
+        "The NOS Colombo diagnostic failed, but PTLife remained operational."
     });
   }
 
-
-  /*
-   * --------------------------------------------------------
-   * SUCCESS
-   * --------------------------------------------------------
-   */
 
   return respond({
     ok: true,
@@ -1013,6 +1277,6 @@ export async function onRequestGet(
       result.data,
 
     next_step:
-      "Back-test specific NOS cinemas in Lisbon, Porto and Algarve before building the production importer."
+      "Use the timing and Colombo schedule results to determine the production NOS import strategy."
   });
 }
