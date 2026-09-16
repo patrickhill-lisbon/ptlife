@@ -1,19 +1,18 @@
 /*
- * PTLife — Cinemas NOS Theater Synchronizer v1
+ * PTLife — Cinemas NOS Theater Synchronizer v2
  *
  * PRODUCTION DATA WRITES.
  *
- * Synchronizes the official NOS theater inventory with PTLife.
- *
- * Safety:
- * - identifies theaters by NOS source_id + theater UUID
- * - updates existing theaters
- * - creates new theaters
- * - does NOT delete theaters missing from a NOS response
- * - rejects suspicious/empty provider responses
- * - reports unresolved locality information
- * - reports theaters that disappeared from the current NOS inventory
+ * Improvements over v1:
+ * - safeRun reliability framework
+ * - validates provider data before D1 writes
+ * - batches updates for existing theaters
+ * - separately times provider fetch / D1 read / D1 writes
+ * - creates genuinely new theaters safely
+ * - never deletes a theater merely because it disappears
  */
+
+import { safeRun } from "../lib/safe-run.js";
 
 const NOS_SOURCE_ID = 8;
 
@@ -90,25 +89,13 @@ function parseLocation(value) {
 }
 
 
-/*
- * Temporary locality normalization.
- *
- * Eventually this should move into PTLife's
- * general locality/geographic normalization
- * system.
- *
- * For now, these values come from the official
- * NOS inventory we already inspected.
- */
 function inferCity(theater) {
 
+  /*
+   * Two NOS addresses need explicit normalization.
+   */
+
   const byUuid = {
-
-    /*
-     * NOS addresses don't make these two
-     * cities sufficiently obvious.
-     */
-
     "54b58378-917a-45b3-ab7b-890ae6b567cb":
       "Alcabideche",
 
@@ -157,7 +144,6 @@ function inferCity(theater) {
 
 
   for (const [needle, city] of candidates) {
-
     if (
       address
         .toLowerCase()
@@ -196,662 +182,828 @@ async function fetchTheaters() {
     await response.text();
 
 
-  let data = null;
+  if (!response.ok) {
+
+    const error =
+      new Error(
+        `NOS theater inventory HTTP ${response.status}`
+      );
+
+    error.httpStatus =
+      response.status;
+
+    error.preview =
+      text.slice(0, 1000);
+
+    throw error;
+  }
+
+
+  let data;
 
   try {
     data =
       JSON.parse(text);
   } catch {
-    // handled below
+    throw new Error(
+      "NOS theater inventory returned invalid JSON"
+    );
+  }
+
+
+  const theaters =
+    data
+      ?.data
+      ?.theaterList
+      ?.items;
+
+
+  if (!Array.isArray(theaters)) {
+    throw new Error(
+      "NOS schema changed: expected data.theaterList.items"
+    );
+  }
+
+
+  /*
+   * Protect against a technically valid but
+   * suspiciously incomplete provider response.
+   */
+
+  if (theaters.length < 20) {
+    throw new Error(
+      `NOS returned suspicious theater count: ${theaters.length}`
+    );
+  }
+
+
+  const invalid =
+    theaters.filter(
+      theater =>
+        !theater?.uuid ||
+        !theater?.name
+    );
+
+
+  if (invalid.length) {
+    throw new Error(
+      `NOS returned ${invalid.length} theater records without UUID/name`
+    );
+  }
+
+
+  const ids =
+    new Set(
+      theaters.map(
+        theater =>
+          theater.uuid
+      )
+    );
+
+
+  if (ids.size !== theaters.length) {
+    throw new Error(
+      "NOS returned duplicate theater UUIDs"
+    );
   }
 
 
   return {
-    ok:
-      response.ok,
+    theaters,
 
-    status:
-      response.status,
-
-    data,
-
-    preview:
-      text.slice(0, 1500),
-
-    duration_ms:
+    fetch_ms:
       Date.now() - started
   };
 }
 
+
+/*
+ * ----------------------------------------------------------
+ * SYNCHRONIZE VALIDATED INVENTORY
+ * ----------------------------------------------------------
+ */
+
+async function synchronizeTheaters(
+  db,
+  theaters
+) {
+
+  const d1ReadStarted =
+    Date.now();
+
+
+  const existingResult =
+    await db.prepare(`
+      SELECT
+        ps.id AS place_source_id,
+        ps.place_id,
+        ps.external_id,
+        ps.status AS source_status,
+        p.slug,
+        p.official_name
+      FROM place_sources ps
+      JOIN places p
+        ON p.id = ps.place_id
+      WHERE ps.source_id = ?
+    `)
+    .bind(NOS_SOURCE_ID)
+    .all();
+
+
+  const existing =
+    existingResult.results || [];
+
+
+  const d1ReadMs =
+    Date.now() - d1ReadStarted;
+
+
+  const existingByUuid =
+    new Map(
+      existing.map(
+        row => [
+          row.external_id,
+          row
+        ]
+      )
+    );
+
+
+  const currentIds =
+    new Set(
+      theaters.map(
+        theater =>
+          theater.uuid
+      )
+    );
+
+
+  const updated = [];
+  const created = [];
+  const unresolved = [];
+
+  const knownTheaters = [];
+  const newTheaters = [];
+
+
+  /*
+   * Split known and new provider identities.
+   */
+
+  for (const theater of theaters) {
+
+    const city =
+      inferCity(theater);
+
+    if (!city) {
+      unresolved.push({
+        uuid:
+          theater.uuid,
+
+        name:
+          theater.name,
+
+        address:
+          theater?.address?.plaintext ||
+          null,
+
+        issue:
+          "city_not_resolved"
+      });
+    }
+
+
+    if (
+      existingByUuid.has(
+        theater.uuid
+      )
+    ) {
+      knownTheaters.push(theater);
+    } else {
+      newTheaters.push(theater);
+    }
+  }
+
+
+  /*
+   * --------------------------------------------------------
+   * FAST PATH — UPDATE ALL KNOWN THEATERS IN ONE D1 BATCH
+   * --------------------------------------------------------
+   */
+
+  const batchStarted =
+    Date.now();
+
+
+  const statements = [];
+
+
+  for (const theater of knownTheaters) {
+
+    const existingLink =
+      existingByUuid.get(
+        theater.uuid
+      );
+
+    const coordinates =
+      parseLocation(
+        theater.location
+      );
+
+    const city =
+      inferCity(theater);
+
+    const address =
+      theater
+        ?.address
+        ?.plaintext ||
+      null;
+
+
+    statements.push(
+
+      db.prepare(`
+        UPDATE places
+        SET
+          official_name = ?,
+          original_language = 'pt-PT',
+          place_type = 'cinema',
+          city = ?,
+          country_code = 'PT',
+          address = ?,
+          latitude = ?,
+          longitude = ?,
+          official_website = ?,
+          status = 'active',
+          updated_at =
+            CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(
+        theater.name,
+        city,
+        address,
+        coordinates.latitude,
+        coordinates.longitude,
+        NOS_ORIGIN + "/",
+        existingLink.place_id
+      )
+
+    );
+
+
+    statements.push(
+
+      db.prepare(`
+        UPDATE place_sources
+        SET
+          source_url = ?,
+          status = 'active',
+          last_verified_at =
+            CURRENT_TIMESTAMP,
+          updated_at =
+            CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(
+        NOS_ORIGIN + "/",
+        existingLink.place_source_id
+      )
+
+    );
+
+
+    updated.push({
+      place_id:
+        existingLink.place_id,
+
+      uuid:
+        theater.uuid,
+
+      name:
+        theater.name
+    });
+  }
+
+
+  if (statements.length) {
+    await db.batch(statements);
+  }
+
+
+  const batchUpdateMs =
+    Date.now() - batchStarted;
+
+
+  /*
+   * --------------------------------------------------------
+   * NEW THEATERS
+   * --------------------------------------------------------
+   *
+   * This is deliberately a slower path because we need
+   * the generated places.id before creating place_sources.
+   *
+   * Normally this array will be empty.
+   */
+
+  const creationStarted =
+    Date.now();
+
+
+  for (const theater of newTheaters) {
+
+    const coordinates =
+      parseLocation(
+        theater.location
+      );
+
+    const city =
+      inferCity(theater);
+
+    const address =
+      theater
+        ?.address
+        ?.plaintext ||
+      null;
+
+    const baseSlug =
+      slugify(
+        theater.name
+      );
+
+
+    /*
+     * Conservative reuse of an existing
+     * manually-created place.
+     */
+
+    const sameSlug =
+      await db.prepare(`
+        SELECT
+          id,
+          official_name
+        FROM places
+        WHERE slug = ?
+        LIMIT 1
+      `)
+      .bind(baseSlug)
+      .first();
+
+
+    let placeId;
+    let reusedExistingPlace =
+      false;
+
+
+    if (sameSlug) {
+
+      placeId =
+        sameSlug.id;
+
+      reusedExistingPlace =
+        true;
+
+
+      await db.prepare(`
+        UPDATE places
+        SET
+          official_name = ?,
+          original_language = 'pt-PT',
+          place_type = 'cinema',
+          city = ?,
+          country_code = 'PT',
+          address = ?,
+          latitude = ?,
+          longitude = ?,
+          official_website = ?,
+          status = 'active',
+          updated_at =
+            CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(
+        theater.name,
+        city,
+        address,
+        coordinates.latitude,
+        coordinates.longitude,
+        NOS_ORIGIN + "/",
+        placeId
+      )
+      .run();
+
+    } else {
+
+      const insert =
+        await db.prepare(`
+          INSERT INTO places (
+            slug,
+            place_type,
+            official_name,
+            original_language,
+            city,
+            country_code,
+            address,
+            latitude,
+            longitude,
+            official_website,
+            status
+          )
+          VALUES (
+            ?,
+            'cinema',
+            ?,
+            'pt-PT',
+            ?,
+            'PT',
+            ?,
+            ?,
+            ?,
+            ?,
+            'active'
+          )
+        `)
+        .bind(
+          baseSlug,
+          theater.name,
+          city,
+          address,
+          coordinates.latitude,
+          coordinates.longitude,
+          NOS_ORIGIN + "/"
+        )
+        .run();
+
+
+      placeId =
+        insert.meta.last_row_id;
+    }
+
+
+    await db.prepare(`
+      INSERT INTO place_sources (
+        place_id,
+        source_id,
+        external_id,
+        source_url,
+        status,
+        last_verified_at
+      )
+      VALUES (
+        ?,
+        ?,
+        ?,
+        ?,
+        'active',
+        CURRENT_TIMESTAMP
+      )
+    `)
+    .bind(
+      placeId,
+      NOS_SOURCE_ID,
+      theater.uuid,
+      NOS_ORIGIN + "/"
+    )
+    .run();
+
+
+    created.push({
+      place_id:
+        placeId,
+
+      uuid:
+        theater.uuid,
+
+      name:
+        theater.name,
+
+      reused_existing_place:
+        reusedExistingPlace
+    });
+  }
+
+
+  const creationMs =
+    Date.now() - creationStarted;
+
+
+  /*
+   * Missing means:
+   *
+   * "previously known through NOS, but not in today's
+   * successful inventory."
+   *
+   * We DO NOT alter the place.
+   */
+
+  const missing =
+    existing
+      .filter(
+        row =>
+          !currentIds.has(
+            row.external_id
+          )
+      )
+      .map(
+        row => ({
+          place_id:
+            row.place_id,
+
+          external_id:
+            row.external_id,
+
+          name:
+            row.official_name,
+
+          previous_source_status:
+            row.source_status
+        })
+      );
+
+
+  return {
+    provider_theaters:
+      theaters.length,
+
+    previously_known:
+      existing.length,
+
+    created:
+      created.length,
+
+    updated:
+      updated.length,
+
+    missing_from_current_inventory:
+      missing.length,
+
+    unresolved:
+      unresolved.length,
+
+    details: {
+      created,
+      updated,
+      missing_from_current_inventory:
+        missing,
+      unresolved
+    },
+
+    timing: {
+      d1_read_ms:
+        d1ReadMs,
+
+      d1_batch_update_ms:
+        batchUpdateMs,
+
+      d1_new_theater_creation_ms:
+        creationMs
+    }
+  };
+}
+
+
+/*
+ * ----------------------------------------------------------
+ * REQUEST
+ * ----------------------------------------------------------
+ */
 
 export async function onRequestGet(context) {
 
   const db =
     context.env.DB;
 
-  const started =
+  const requestStarted =
     Date.now();
 
 
-  try {
+  /*
+   * safeRun now owns provider reliability.
+   */
 
-    /*
-     * --------------------------------------
-     * 1. FETCH CURRENT NOS INVENTORY
-     * --------------------------------------
-     */
+  const result =
+    await safeRun({
 
-    const provider =
-      await fetchTheaters();
-
-
-    if (!provider.ok) {
-
-      return respond({
-        ok: false,
-        graceful_failure: true,
-        provider:
-          "Cinemas NOS",
-        stage:
-          "theater_inventory_http",
-        http_status:
-          provider.status,
-        preview:
-          provider.preview,
-        writes_performed:
-          false,
-        duration_ms:
-          Date.now() - started
-      });
-    }
-
-
-    const theaters =
-      provider
-        .data
-        ?.data
-        ?.theaterList
-        ?.items;
-
-
-    if (!Array.isArray(theaters)) {
-
-      return respond({
-        ok: false,
-        graceful_failure: true,
-        provider:
-          "Cinemas NOS",
-        stage:
-          "theater_inventory_schema",
-        message:
-          "Expected data.theaterList.items array.",
-        writes_performed:
-          false,
-        duration_ms:
-          Date.now() - started
-      });
-    }
-
-
-    /*
-     * --------------------------------------
-     * 2. SANITY CHECK
-     * --------------------------------------
-     *
-     * We know NOS currently returns 29.
-     *
-     * Do NOT synchronize a suspiciously tiny
-     * response. This protects us from marking
-     * dozens of venues as apparently missing
-     * because of a provider-side problem.
-     *
-     * 20 is deliberately conservative rather
-     * than requiring exactly 29, because NOS
-     * may legitimately add/remove cinemas.
-     */
-
-    if (theaters.length < 20) {
-
-      return respond({
-        ok: false,
-        graceful_failure: true,
-        provider:
-          "Cinemas NOS",
-        stage:
-          "inventory_sanity_check",
-        message:
-          "NOS returned an unexpectedly small theater inventory.",
-        theater_count:
-          theaters.length,
-        writes_performed:
-          false,
-        duration_ms:
-          Date.now() - started
-      });
-    }
-
-
-    /*
-     * Every theater must have a provider ID.
-     */
-
-    const invalid =
-      theaters.filter(
-        theater =>
-          !theater?.uuid ||
-          !theater?.name
-      );
-
-
-    if (invalid.length) {
-
-      return respond({
-        ok: false,
-        graceful_failure: true,
-        provider:
-          "Cinemas NOS",
-        stage:
-          "inventory_validation",
-        message:
-          "One or more NOS theaters lacked UUID or name.",
-        invalid_count:
-          invalid.length,
-        writes_performed:
-          false,
-        duration_ms:
-          Date.now() - started
-      });
-    }
-
-
-    /*
-     * Detect duplicate UUIDs before touching D1.
-     */
-
-    const uuidSet =
-      new Set(
-        theaters.map(
-          theater =>
-            theater.uuid
-        )
-      );
-
-
-    if (
-      uuidSet.size !==
-      theaters.length
-    ) {
-
-      return respond({
-        ok: false,
-        graceful_failure: true,
-        provider:
-          "Cinemas NOS",
-        stage:
-          "duplicate_provider_ids",
-        message:
-          "NOS returned duplicate theater UUIDs.",
-        theater_count:
-          theaters.length,
-        unique_uuid_count:
-          uuidSet.size,
-        writes_performed:
-          false,
-        duration_ms:
-          Date.now() - started
-      });
-    }
-
-
-    /*
-     * --------------------------------------
-     * 3. LOAD EXISTING NOS PLACE LINKS
-     * --------------------------------------
-     */
-
-    const existingResult =
-      await db.prepare(`
-        SELECT
-          ps.id AS place_source_id,
-          ps.place_id,
-          ps.external_id,
-          ps.status AS source_status,
-          p.slug,
-          p.official_name
-        FROM place_sources ps
-        JOIN places p
-          ON p.id = ps.place_id
-        WHERE ps.source_id = ?
-      `)
-      .bind(NOS_SOURCE_ID)
-      .all();
-
-
-    const existing =
-      existingResult.results || [];
-
-
-    const existingByUuid =
-      new Map(
-        existing.map(
-          row => [
-            row.external_id,
-            row
-          ]
-        )
-      );
-
-
-    /*
-     * --------------------------------------
-     * 4. SYNCHRONIZE
-     * --------------------------------------
-     */
-
-    const created = [];
-    const updated = [];
-    const unresolved = [];
-
-
-    for (const theater of theaters) {
-
-      const uuid =
-        theater.uuid;
-
-      const name =
-        theater.name;
-
-      const address =
-        theater
-          ?.address
-          ?.plaintext ||
-        null;
-
-      const coordinates =
-        parseLocation(
-          theater.location
-        );
-
-      const city =
-        inferCity(theater);
-
-      const existingLink =
-        existingByUuid.get(uuid);
-
-
-      if (!city) {
-
-        unresolved.push({
-          uuid,
-          name,
-          issue:
-            "city_not_resolved",
-          address
-        });
-      }
-
-
-      /*
-       * Existing provider identity:
-       * update the same PTLife place.
-       */
-
-      if (existingLink) {
-
-        await db.prepare(`
-          UPDATE places
-          SET
-            official_name = ?,
-            original_language = 'pt-PT',
-            place_type = 'cinema',
-            city = ?,
-            country_code = 'PT',
-            address = ?,
-            latitude = ?,
-            longitude = ?,
-            official_website = ?,
-            status = 'active',
-            updated_at =
-              CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bind(
-          name,
-          city,
-          address,
-          coordinates.latitude,
-          coordinates.longitude,
-          NOS_ORIGIN + "/",
-          existingLink.place_id
-        )
-        .run();
-
-
-        await db.prepare(`
-          UPDATE place_sources
-          SET
-            source_url = ?,
-            status = 'active',
-            last_verified_at =
-              CURRENT_TIMESTAMP,
-            updated_at =
-              CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bind(
-          NOS_ORIGIN + "/",
-          existingLink.place_source_id
-        )
-        .run();
-
-
-        updated.push({
-          place_id:
-            existingLink.place_id,
-          uuid,
-          name
-        });
-
-        continue;
-      }
-
-
-      /*
-       * ----------------------------------
-       * New NOS UUID.
-       *
-       * Before creating a place, attempt
-       * conservative slug reuse.
-       * ----------------------------------
-       */
-
-      const baseSlug =
-        slugify(name);
-
-
-      const sameSlug =
-        await db.prepare(`
-          SELECT id, official_name
-          FROM places
-          WHERE slug = ?
-          LIMIT 1
-        `)
-        .bind(baseSlug)
-        .first();
-
-
-      let placeId;
-      let reusedExistingPlace =
-        false;
-
-
-      if (sameSlug) {
-
-        /*
-         * A matching slug is strong enough
-         * for this controlled NOS import,
-         * but report that reuse explicitly.
-         */
-
-        placeId =
-          sameSlug.id;
-
-        reusedExistingPlace =
-          true;
-
-
-        await db.prepare(`
-          UPDATE places
-          SET
-            official_name = ?,
-            original_language = 'pt-PT',
-            place_type = 'cinema',
-            city = ?,
-            country_code = 'PT',
-            address = ?,
-            latitude = ?,
-            longitude = ?,
-            official_website = ?,
-            status = 'active',
-            updated_at =
-              CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bind(
-          name,
-          city,
-          address,
-          coordinates.latitude,
-          coordinates.longitude,
-          NOS_ORIGIN + "/",
-          placeId
-        )
-        .run();
-      }
-
-      else {
-
-        const insert =
-          await db.prepare(`
-            INSERT INTO places (
-              slug,
-              place_type,
-              official_name,
-              original_language,
-              city,
-              country_code,
-              address,
-              latitude,
-              longitude,
-              official_website,
-              status
-            )
-            VALUES (
-              ?, 'cinema', ?, 'pt-PT',
-              ?, 'PT', ?, ?, ?, ?,
-              'active'
-            )
-          `)
-          .bind(
-            baseSlug,
-            name,
-            city,
-            address,
-            coordinates.latitude,
-            coordinates.longitude,
-            NOS_ORIGIN + "/"
-          )
-          .run();
-
-
-        placeId =
-          insert.meta.last_row_id;
-      }
-
-
-      /*
-       * UNIQUE(source_id, external_id)
-       * protects us at database level.
-       */
-
-      await db.prepare(`
-        INSERT INTO place_sources (
-          place_id,
-          source_id,
-          external_id,
-          source_url,
-          status,
-          last_verified_at
-        )
-        VALUES (
-          ?, ?, ?, ?, 'active',
-          CURRENT_TIMESTAMP
-        )
-      `)
-      .bind(
-        placeId,
-        NOS_SOURCE_ID,
-        uuid,
-        NOS_ORIGIN + "/"
-      )
-      .run();
-
-
-      created.push({
-        place_id:
-          placeId,
-        uuid,
-        name,
-        reused_existing_place:
-          reusedExistingPlace
-      });
-    }
-
-
-    /*
-     * --------------------------------------
-     * 5. DETECT PREVIOUSLY KNOWN NOS
-     *    THEATERS ABSENT TODAY
-     * --------------------------------------
-     *
-     * IMPORTANT:
-     * We only REPORT these.
-     *
-     * We do not close, retire or delete them.
-     */
-
-    const missing =
-      existing
-        .filter(
-          row =>
-            !uuidSet.has(
-              row.external_id
-            )
-        )
-        .map(
-          row => ({
-            place_id:
-              row.place_id,
-
-            external_id:
-              row.external_id,
-
-            name:
-              row.official_name,
-
-            previous_source_status:
-              row.source_status
-          })
-        );
-
-
-    /*
-     * --------------------------------------
-     * 6. RESULT
-     * --------------------------------------
-     */
-
-    return respond({
-      ok: true,
+      db,
 
       provider:
-        "Cinemas NOS",
+        "cinemas_nos",
 
-      source_id:
-        NOS_SOURCE_ID,
-
-      synchronization: true,
-
-      fetched_at:
-        new Date().toISOString(),
-
-      provider_fetch_ms:
-        provider.duration_ms,
-
-      duration_ms:
-        Date.now() - started,
-
-      inventory: {
-        provider_theaters:
-          theaters.length,
-
-        previously_known:
-          existing.length,
-
-        created:
-          created.length,
-
-        updated:
-          updated.length,
-
-        missing_from_current_inventory:
-          missing.length,
-
-        unresolved:
-          unresolved.length
-      },
-
-      created,
-
-      updated,
-
-      missing_from_current_inventory:
-        missing,
-
-      unresolved,
-
-      safety: {
-        missing_theaters_deleted:
-          false,
-
-        missing_theaters_closed:
-          false,
-
-        provider_identity:
-          "source_id + external_id",
-
-        minimum_inventory_required:
-          20
-      },
-
-      next_step:
-        "Inspect the synchronization result and verify the NOS place count in D1 before importing movie programs and occurrences."
-    });
-
-
-  } catch (error) {
-
-    /*
-     * Graceful response instead of raw 502.
-     *
-     * Later we'll route this through safeRun
-     * so provider_health/system_errors are
-     * updated automatically as well.
-     */
-
-    return respond({
-      ok: false,
-
-      graceful_failure: true,
-
-      provider:
-        "Cinemas NOS",
-
-      source_id:
-        NOS_SOURCE_ID,
+      operation:
+        "sync_theaters",
 
       stage:
         "theater_synchronization",
 
-      message:
-        error?.message ||
-        String(error),
+      sourceFile:
+        "functions/api/nos-theaters-sync.js",
 
-      stack:
-        error?.stack || null,
+      request:
+        context.request,
 
-      duration_ms:
-        Date.now() - started
+      reproduction:
+        "GET /api/nos-theaters-sync",
+
+      fallbackData: {
+        inventory: null,
+        theaters: []
+      },
+
+
+      /*
+       * Provider + synchronization operation.
+       */
+
+      run:
+        async () => {
+
+          /*
+           * Fetch and completely validate NOS
+           * BEFORE database synchronization.
+           */
+
+          const provider =
+            await fetchTheaters();
+
+
+          const synchronization =
+            await synchronizeTheaters(
+              db,
+              provider.theaters
+            );
+
+
+          return {
+            fetched_at:
+              new Date().toISOString(),
+
+            provider_fetch_ms:
+              provider.fetch_ms,
+
+            inventory:
+              {
+                provider_theaters:
+                  synchronization
+                    .provider_theaters,
+
+                previously_known:
+                  synchronization
+                    .previously_known,
+
+                created:
+                  synchronization
+                    .created,
+
+                updated:
+                  synchronization
+                    .updated,
+
+                missing_from_current_inventory:
+                  synchronization
+                    .missing_from_current_inventory,
+
+                unresolved:
+                  synchronization
+                    .unresolved
+              },
+
+            created:
+              synchronization
+                .details
+                .created,
+
+            updated:
+              synchronization
+                .details
+                .updated,
+
+            missing_from_current_inventory:
+              synchronization
+                .details
+                .missing_from_current_inventory,
+
+            unresolved:
+              synchronization
+                .details
+                .unresolved,
+
+            timing:
+              synchronization
+                .timing,
+
+            safety: {
+              missing_theaters_deleted:
+                false,
+
+              missing_theaters_closed:
+                false,
+
+              provider_identity:
+                "source_id + external_id",
+
+              minimum_inventory_required:
+                20
+            }
+          };
+        },
+
+
+      /*
+       * This is a second defensive validation
+       * layer inside safeRun.
+       */
+
+      validate:
+        result => {
+
+          if (
+            !result?.inventory ||
+            result
+              .inventory
+              .provider_theaters < 20
+          ) {
+            throw new Error(
+              "NOS theater synchronization produced an invalid inventory"
+            );
+          }
+
+          return true;
+        },
+
+
+      getItemCount:
+        result =>
+          result
+            ?.inventory
+            ?.provider_theaters ??
+          null,
+
+
+      getMetadata:
+        result => ({
+          source_id:
+            NOS_SOURCE_ID,
+
+          provider_fetch_ms:
+            result
+              ?.provider_fetch_ms ??
+            null,
+
+          d1_read_ms:
+            result
+              ?.timing
+              ?.d1_read_ms ??
+            null,
+
+          d1_batch_update_ms:
+            result
+              ?.timing
+              ?.d1_batch_update_ms ??
+            null,
+
+          created:
+            result
+              ?.inventory
+              ?.created ??
+            null,
+
+          updated:
+            result
+              ?.inventory
+              ?.updated ??
+            null,
+
+          missing:
+            result
+              ?.inventory
+              ?.missing_from_current_inventory ??
+            null
+        })
     });
-  }
+
+
+  /*
+   * safeRun returns a predictable object regardless
+   * of provider success/failure.
+   */
+
+  return respond({
+
+    ...result,
+
+    synchronization:
+      result.ok,
+
+    total_request_ms:
+      Date.now() - requestStarted,
+
+    graceful_failure:
+      !result.ok,
+
+    next_step:
+      result.ok
+        ? "Compare timing with v1. If the batch synchronization is healthy and fast, proceed to NOS movie/showtime ingestion."
+        : "The failure was handled by PTLife reliability. Inspect system_errors and provider_health."
+
+  });
 }
