@@ -1,30 +1,43 @@
 /*
- * PTLife — IMAX / Algolia Test v1
+ * PTLife — IMAX / Algolia Test v2
  *
  * Diagnostic only.
  *
  * Purpose:
- *   Test whether we can retrieve structured theatre/showtime data
- *   directly from the Algolia index used by the IMAX website.
+ *   Test the IMAX Algolia showtimes index across Portugal.
  *
- * Initial test:
- *   Cinema NOS Colombo IMAX, Lisbon
+ * Default:
+ *   Return all Portuguese theatres in the index.
+ *
+ * Optional:
+ *   ?q=Colombo
+ *   ?q=Porto
+ *   ?q=Albufeira
  *
  * This does NOT modify the PTLife generic extractor.
  */
 
 const ALGOLIA_APP_ID = "10MXKGB0UH";
-const ALGOLIA_SEARCH_KEY = "7c9c8e2eadbdc26fb3b97b5db64a28dd";
-const ALGOLIA_INDEX = "dev_web23_showtimes";
+const ALGOLIA_SEARCH_KEY =
+  "7c9c8e2eadbdc26fb3b97b5db64a28dd";
+
+const ALGOLIA_INDEX =
+  "dev_web23_showtimes";
 
 function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
+  return new Response(
+    JSON.stringify(data, null, 2),
+    {
+      status,
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
+
+        "cache-control":
+          "no-store",
+      },
+    }
+  );
 }
 
 async function queryAlgolia(params) {
@@ -36,7 +49,8 @@ async function queryAlgolia(params) {
     method: "POST",
 
     headers: {
-      "content-type": "application/json",
+      "content-type":
+        "application/json",
 
       "x-algolia-application-id":
         ALGOLIA_APP_ID,
@@ -46,11 +60,15 @@ async function queryAlgolia(params) {
     },
 
     body: JSON.stringify({
-      params: new URLSearchParams(params).toString(),
+      params:
+        new URLSearchParams(
+          params
+        ).toString(),
     }),
   });
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   let data;
 
@@ -69,47 +87,146 @@ async function queryAlgolia(params) {
   };
 }
 
+function makeSummary(hit, index) {
+  return {
+    result_number:
+      index + 1,
+
+    objectID:
+      hit?.objectID ?? null,
+
+    name:
+      hit?.name ??
+      hit?.title ??
+      null,
+
+    slug:
+      hit?.slug ?? null,
+
+    type:
+      hit?.type ??
+      hit?.contentType ??
+      null,
+
+    city:
+      hit?.city ?? null,
+
+    state:
+      hit?.stateName ??
+      hit?.state ??
+      null,
+
+    country_code:
+      hit?.country ?? null,
+
+    country_name:
+      hit?.countryName ?? null,
+
+    latitude:
+      hit?._geoloc?.lat ??
+      hit?.latitude ??
+      null,
+
+    longitude:
+      hit?._geoloc?.lng ??
+      hit?.longitude ??
+      null,
+
+    events_count:
+      Array.isArray(hit?.events)
+        ? hit.events.length
+        : null,
+
+    showtimes_count:
+      Array.isArray(hit?.showtimes)
+        ? hit.showtimes.length
+        : null,
+
+    top_level_fields:
+      Object.keys(hit || {}),
+  };
+}
+
 export async function onRequestGet(context) {
   const requestUrl =
     new URL(context.request.url);
 
   /*
-   * Allow us to change the search from the browser later.
+   * DEFAULT MODE
    *
-   * Examples:
+   * No ?q= parameter:
    *
-   * /api/imax-test
+   *     /api/imax-test
    *
-   * /api/imax-test?q=Colombo
+   * Search the entire IMAX showtimes
+   * index and restrict results to Portugal.
    *
-   * /api/imax-test?q=Porto
    *
-   * /api/imax-test?q=Algarve
+   * OPTIONAL SEARCH MODE
+   *
+   *     /api/imax-test?q=Colombo
+   *     /api/imax-test?q=Porto
+   *     /api/imax-test?q=Albufeira
+   *
+   * This performs a text search but still
+   * restricts results to Portugal.
    */
 
   const q =
-    requestUrl.searchParams.get("q") ||
-    "Cinema NOS Colombo IMAX";
+    requestUrl.searchParams.get("q");
+
+  const searchQuery =
+    q ? q : "";
+
+  /*
+   * The records we inspected use:
+   *
+   *     country: "PT"
+   *
+   * We therefore ask Algolia to return
+   * only Portuguese records.
+   */
+
+  const params = {
+    query: searchQuery,
+
+    hitsPerPage: "100",
+
+    filters:
+      'country:"PT"',
+  };
 
   let result;
 
   try {
-    result = await queryAlgolia({
-      query: q,
-      hitsPerPage: "20",
-    });
+    result =
+      await queryAlgolia(params);
   } catch (error) {
     return jsonResponse(
       {
         ok: false,
-        stage: "algolia_fetch",
-        error: String(
-          error?.message || error
-        ),
+
+        stage:
+          "algolia_fetch",
+
+        error:
+          String(
+            error?.message ||
+            error
+          ),
       },
       502
     );
   }
+
+  /*
+   * If Algolia rejects the filter,
+   * return its actual response.
+   *
+   * We do NOT silently fall back because
+   * this test is intended to tell us
+   * whether country filtering works.
+   */
 
   if (!result.ok) {
     return jsonResponse(
@@ -117,8 +234,20 @@ export async function onRequestGet(context) {
         ok: false,
 
         test: {
-          query: q,
-          index: ALGOLIA_INDEX,
+          mode:
+            q
+              ? "portugal_text_search"
+              : "all_portugal",
+
+          query:
+            searchQuery,
+
+          filter:
+            'country:"PT"',
+
+          index:
+            ALGOLIA_INDEX,
+
           application_id:
             ALGOLIA_APP_ID,
         },
@@ -128,84 +257,115 @@ export async function onRequestGet(context) {
 
         algolia_response:
           result.data,
+
+        interpretation:
+          "Algolia rejected the request. Do not assume the country field is filterable until we inspect this response.",
       },
       result.status
     );
   }
 
   const rawHits =
-    Array.isArray(result.data?.hits)
+    Array.isArray(
+      result.data?.hits
+    )
       ? result.data.hits
       : [];
 
+  const summary =
+    rawHits.map(
+      (hit, index) =>
+        makeSummary(
+          hit,
+          index
+        )
+    );
+
   /*
-   * For this first test we intentionally return BOTH:
-   *
-   *   1. a compact summary
-   *   2. the complete raw hits
-   *
-   * We don't yet know exactly which fields IMAX stores in each
-   * theatre/showtime object, and we do not want to throw useful
-   * information away before examining it.
+   * Make a second compact list that is
+   * particularly useful for our Portugal
+   * coverage test.
    */
 
-  const summary = rawHits.map(
-    (hit, index) => ({
-      result_number: index + 1,
+  const theatreInventory =
+    summary.map(
+      (item) => ({
+        name:
+          item.name,
 
-      objectID:
-        hit?.objectID ?? null,
+        slug:
+          item.slug,
 
-      name:
-        hit?.name ??
-        hit?.title ??
-        null,
+        city:
+          item.city,
 
-      slug:
-        hit?.slug ?? null,
+        state:
+          item.state,
 
-      type:
-        hit?.type ??
-        hit?.contentType ??
-        null,
+        country_code:
+          item.country_code,
 
-      city:
-        hit?.city ?? null,
+        events_count:
+          item.events_count,
 
-      state:
-        hit?.stateName ??
-        hit?.state ??
-        null,
+        latitude:
+          item.latitude,
 
-      country:
-        hit?.countryName ??
-        hit?.country ??
-        null,
+        longitude:
+          item.longitude,
+      })
+    );
 
-      latitude:
-        hit?._geoloc?.lat ??
-        hit?.latitude ??
-        null,
+  /*
+   * Also identify anything whose location
+   * text suggests Algarve.
+   *
+   * This is NOT used for extraction.
+   * It is merely a convenient diagnostic
+   * in the returned JSON.
+   */
 
-      longitude:
-        hit?._geoloc?.lng ??
-        hit?.longitude ??
-        null,
+  const algarveCandidates =
+    summary.filter(
+      (item) => {
+        const location =
+          [
+            item.name,
+            item.city,
+            item.state,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
 
-      events_count:
-        Array.isArray(hit?.events)
-          ? hit.events.length
-          : null,
-
-      showtimes_count:
-        Array.isArray(hit?.showtimes)
-          ? hit.showtimes.length
-          : null,
-
-      top_level_fields:
-        Object.keys(hit || {}),
-    })
-  );
+        return (
+          location.includes(
+            "algarve"
+          ) ||
+          location.includes(
+            "faro"
+          ) ||
+          location.includes(
+            "albufeira"
+          ) ||
+          location.includes(
+            "portimão"
+          ) ||
+          location.includes(
+            "portimao"
+          ) ||
+          location.includes(
+            "loulé"
+          ) ||
+          location.includes(
+            "loule"
+          ) ||
+          location.includes(
+            "lagos"
+          )
+        );
+      }
+    );
 
   return jsonResponse({
     ok: true,
@@ -215,9 +375,18 @@ export async function onRequestGet(context) {
 
     test: {
       purpose:
-        "Determine whether PTLife can retrieve IMAX theatre/showtime data directly from Algolia.",
+        "Determine the Portuguese theatre coverage of the IMAX Algolia showtimes index.",
 
-      query: q,
+      mode:
+        q
+          ? "portugal_text_search"
+          : "all_portugal",
+
+      query:
+        searchQuery,
+
+      filter:
+        'country:"PT"',
 
       application_id:
         ALGOLIA_APP_ID,
@@ -234,6 +403,9 @@ export async function onRequestGet(context) {
         result.data?.nbHits ??
         rawHits.length,
 
+      returned_hits:
+        rawHits.length,
+
       page:
         result.data?.page ??
         null,
@@ -242,21 +414,52 @@ export async function onRequestGet(context) {
         result.data?.nbPages ??
         null,
 
+      hits_per_page:
+        result.data
+          ?.hitsPerPage ??
+        100,
+
       processing_time_ms:
         result.data
           ?.processingTimeMS ??
         null,
     },
 
+    /*
+     * THIS IS THE MAIN RESULT WE WANT
+     * TO LOOK AT.
+     */
+
+    portugal_theatre_inventory:
+      theatreInventory,
+
+    portugal_theatre_count:
+      theatreInventory.length,
+
+    /*
+     * Convenience check for our Algarve
+     * question.
+     */
+
+    algarve_candidates:
+      algarveCandidates,
+
+    /*
+     * Keep the previous summary format.
+     */
+
     summary,
 
     /*
-     * Deliberately retained for our first
-     * reverse-engineering test.
+     * Keep raw records for now because
+     * we're still reverse-engineering
+     * the source.
      */
-    raw_hits: rawHits,
+
+    raw_hits:
+      rawHits,
 
     next_step:
-      "Inspect the Colombo result structure before writing any production adapter.",
+      "Determine how much of Portugal this IMAX source covers. If Algarve NOS cinemas are absent, test NOS's own underlying data source rather than writing cinema-specific crawlers.",
   });
 }
