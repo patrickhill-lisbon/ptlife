@@ -1,5 +1,5 @@
 /*
- * PTLife — Cinemas NOS Provider Adapter
+ * PTLife / WorthAGo — Cinemas NOS Provider Adapter
  *
  * Copyright © 2026 Patrick J. Hill
  * All rights reserved.
@@ -37,6 +37,30 @@ const SESSIONS_BASE =
   NOS_ORIGIN +
   "/bin/cinemas/render/" +
   "getMovieSessions.getMovieSessionsAggregator.json";
+
+
+/*
+ * NOS groups after-midnight screenings with the preceding
+ * cinema operational day.
+ *
+ * Example:
+ *
+ *   operationalDate = 2026-09-16
+ *   time            = 00:10
+ *
+ * represents the real calendar datetime:
+ *
+ *   2026-09-17T00:10:00
+ *
+ * We currently use 04:00 as the operational-day boundary
+ * for NOS. The original operationalDate is also preserved
+ * in normalized session data so the presentation layer can
+ * later group the screening with the evening NOS assigned it
+ * to while displaying the true calendar date when useful.
+ */
+
+const NOS_OPERATIONAL_DAY_CUTOFF_HOUR =
+  4;
 
 
 function clean(value) {
@@ -150,6 +174,76 @@ function absoluteNosUrl(path) {
 }
 
 
+/*
+ * =========================================================
+ * NOS OPERATIONAL-DATE RULE
+ * =========================================================
+ *
+ * operationalDate is the cinema schedule/business date.
+ *
+ * startsAt must instead represent the real calendar
+ * datetime at which the screening occurs.
+ *
+ * Sessions between:
+ *
+ *   00:00 and 03:59
+ *
+ * are therefore moved to the following calendar date.
+ *
+ * IMPORTANT:
+ *
+ * We deliberately do this without constructing a JavaScript
+ * Date from a local Lisbon datetime. That avoids accidental
+ * UTC/browser/runtime timezone conversion.
+ */
+
+function nextCalendarDate(
+  year,
+  month,
+  day
+) {
+  /*
+   * Date.UTC is used only for calendar arithmetic.
+   *
+   * We extract the UTC date components afterward and return
+   * a date string without interpreting the eventual session
+   * datetime as UTC.
+   */
+
+  const date =
+    new Date(
+      Date.UTC(
+        year,
+        month - 1,
+        day + 1
+      )
+    );
+
+
+  const yyyy =
+    date
+      .getUTCFullYear()
+      .toString()
+      .padStart(4, "0");
+
+  const mm =
+    (
+      date.getUTCMonth() + 1
+    )
+      .toString()
+      .padStart(2, "0");
+
+  const dd =
+    date
+      .getUTCDate()
+      .toString()
+      .padStart(2, "0");
+
+
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+
 function buildStartsAt(
   operationalDate,
   time
@@ -164,15 +258,18 @@ function buildStartsAt(
     return null;
   }
 
+
   const dateMatch =
     date.match(
       /^(\d{4})-(\d{2})-(\d{2})/
     );
 
+
   const timeMatch =
     clock.match(
       /^(\d{1,2}):(\d{2})/
     );
+
 
   if (
     !dateMatch ||
@@ -181,16 +278,80 @@ function buildStartsAt(
     return null;
   }
 
-  const hh =
-    timeMatch[1]
-      .padStart(2, "0");
 
-  return (
+  const year =
+    Number(dateMatch[1]);
+
+  const month =
+    Number(dateMatch[2]);
+
+  const day =
+    Number(dateMatch[3]);
+
+  const hour =
+    Number(timeMatch[1]);
+
+  const minute =
+    Number(timeMatch[2]);
+
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+
+  let calendarDate =
     `${dateMatch[1]}-` +
     `${dateMatch[2]}-` +
-    `${dateMatch[3]}T` +
-    `${hh}:` +
-    `${timeMatch[2]}:00`
+    `${dateMatch[3]}`;
+
+
+  /*
+   * NOS OPERATIONAL-DATE RULE
+   *
+   * A 00:10 session appearing under September 16 is really
+   * September 17 at 00:10.
+   */
+
+  if (
+    hour <
+    NOS_OPERATIONAL_DAY_CUTOFF_HOUR
+  ) {
+    calendarDate =
+      nextCalendarDate(
+        year,
+        month,
+        day
+      );
+  }
+
+
+  const hh =
+    String(hour)
+      .padStart(2, "0");
+
+  const min =
+    String(minute)
+      .padStart(2, "0");
+
+
+  return (
+    `${calendarDate}T` +
+    `${hh}:${min}:00`
   );
 }
 
@@ -214,6 +375,7 @@ export async function fetchCatalogue() {
 
   return {
     rows,
+
     fetch: {
       durationMs:
         fetched.durationMs,
@@ -229,8 +391,8 @@ export async function fetchCatalogue() {
 
 
 /*
- * Convert NOS catalogue rows into one PTLife candidate
- * per aggregate movie.
+ * Convert NOS catalogue rows into one PTLife/WorthAGo
+ * candidate per aggregate movie.
  *
  * NOS can expose multiple variants of one movie, such as
  * 2D and IMAX. Those variants share aggregateformatnumber.
@@ -264,12 +426,14 @@ export function normalizeCatalogue(
       continue;
     }
 
+
     if (!groups.has(aggregateId)) {
       groups.set(
         aggregateId,
         []
       );
     }
+
 
     groups
       .get(aggregateId)
@@ -356,6 +520,7 @@ export async function fetchSessions(
     );
   }
 
+
   const url =
     SESSIONS_BASE +
     "?aggregateMovieId=" +
@@ -363,10 +528,12 @@ export async function fetchSessions(
       aggregateMovieId
     );
 
+
   const fetched =
     await fetchProviderJson(
       url
     );
+
 
   return {
     aggregateMovieId,
@@ -390,11 +557,17 @@ export async function fetchSessions(
 
 /*
  * Normalize NOS session data without knowing anything
- * about PTLife's database IDs.
+ * about WorthAGo's database IDs.
  *
  * Theater identity remains the NOS external UUID.
- * The synchronization layer will later translate that
- * into a PTLife place_id.
+ *
+ * operationalDate remains the provider's cinema/business
+ * date.
+ *
+ * startsAt is the actual calendar datetime.
+ *
+ * The synchronization layer later translates theater
+ * identity into a WorthAGo place_id.
  */
 
 export function normalizeSessions(
@@ -407,6 +580,7 @@ export function normalizeSessions(
     )
       ? data.days
       : [];
+
 
   const sessions = [];
 
@@ -429,10 +603,12 @@ export function normalizeSessions(
           theater?.theaterID
         );
 
+
       const theaterName =
         clean(
           theater?.name
         );
+
 
       const theaterSessions =
         Array.isArray(
@@ -451,6 +627,7 @@ export function normalizeSessions(
             session?.uuid
           );
 
+
         if (!externalId) {
           rejected.push({
             reason:
@@ -467,10 +644,26 @@ export function normalizeSessions(
         }
 
 
+        /*
+         * Preserve NOS's original operational date.
+         */
+
+        const operationalDate =
+          clean(
+            session?.operationalDate
+          );
+
+
+        const sessionTime =
+          clean(
+            session?.time
+          );
+
+
         const startsAt =
           buildStartsAt(
-            session?.operationalDate,
-            session?.time
+            operationalDate,
+            sessionTime
           );
 
 
@@ -485,7 +678,12 @@ export function normalizeSessions(
 
             theaterExternalId,
 
-            theaterName
+            theaterName,
+
+            operationalDate,
+
+            time:
+              sessionTime
           });
 
           continue;
@@ -500,6 +698,23 @@ export function normalizeSessions(
           theaterExternalId,
 
           theaterName,
+
+          /*
+           * Provider's schedule/business date.
+           */
+
+          operationalDate,
+
+          /*
+           * Provider's displayed local clock time.
+           */
+
+          time:
+            sessionTime,
+
+          /*
+           * Actual local calendar datetime.
+           */
 
           startsAt,
 
@@ -570,9 +785,12 @@ export function normalizeSessions(
 
   return {
     aggregateMovieId,
+
     days:
       days.length,
+
     sessions,
+
     rejected
   };
 }
