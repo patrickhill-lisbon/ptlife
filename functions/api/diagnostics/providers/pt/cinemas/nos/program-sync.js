@@ -1,25 +1,33 @@
 /*
- * PTLife — NOS Generic Program Synchronizer Diagnostic
+ * PTLife / WorthAGo — NOS Generic Program Sync Diagnostic
  *
  * Copyright © 2026 Patrick J. Hill
  * All rights reserved.
  *
  * CONTROLLED WRITE TEST.
  *
- * Tests:
+ * Tests one explicitly selected NOS program through:
  *
  *   NOS provider adapter
  *          ↓
  *   normalizeCatalogue()
  *          ↓
- *   select ONE known program
+ *   select requested external_id
  *          ↓
  *   generic syncPrograms()
  *
- * Only the selected NOS program is passed to the
- * synchronizer.
+ * Usage:
  *
- * Missing programs are NEVER deleted or retired.
+ * /api/diagnostics/providers/pt/cinemas/nos/program-sync
+ *   ?external_id=<NOS aggregate movie ID>
+ *
+ * Safety:
+ *
+ *   - requires an explicit external_id
+ *   - submits exactly one program
+ *   - never imports the complete catalogue
+ *   - never touches occurrences
+ *   - never deletes or retires missing programs
  */
 
 import {
@@ -35,16 +43,6 @@ import {
   fetchCatalogue,
   normalizeCatalogue
 } from "../../../../../../providers/pt/cinemas/nos.js";
-
-
-/*
- * Existing controlled-test movie:
- *
- * A Odisseia / The Odyssey
- */
-
-const TEST_EXTERNAL_ID =
-  "1e70190b-5cf3-4937-b361-24f67bdd11d0";
 
 
 function respond(
@@ -71,14 +69,49 @@ function respond(
 }
 
 
+function clean(value) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  const result =
+    String(value).trim();
+
+  return result || null;
+}
+
+
 async function runDiagnostic(
-  db
+  db,
+  requestedExternalId
 ) {
 
   /*
-   * ---------------------------------------------
-   * 1. FETCH THROUGH CANONICAL PROVIDER ADAPTER
-   * ---------------------------------------------
+   * -------------------------------------------------------
+   * 1. REQUIRE EXPLICIT PROGRAM IDENTITY
+   * -------------------------------------------------------
+   */
+
+  const externalId =
+    clean(
+      requestedExternalId
+    );
+
+
+  if (!externalId) {
+    throw new Error(
+      "This diagnostic requires an explicit external_id query parameter"
+    );
+  }
+
+
+  /*
+   * -------------------------------------------------------
+   * 2. FETCH + NORMALIZE CURRENT NOS CATALOGUE
+   * -------------------------------------------------------
    */
 
   const catalogue =
@@ -91,52 +124,95 @@ async function runDiagnostic(
     );
 
 
-  /*
-   * ---------------------------------------------
-   * 2. SELECT EXACTLY ONE PROGRAM
-   * ---------------------------------------------
-   */
-
-  const selected =
-    normalized.movies.find(
-      movie =>
-        movie.externalId ===
-        TEST_EXTERNAL_ID
-    );
-
-
-  if (!selected) {
+  if (
+    !Array.isArray(
+      normalized.movies
+    ) ||
+    normalized.movies.length === 0
+  ) {
     throw new Error(
-      "Controlled NOS test movie is not present in current catalogue"
+      "NOS normalized catalogue contains no movies"
     );
   }
 
 
   /*
-   * Important safety assertion:
-   *
-   * Never accidentally hand the complete catalogue
-   * to this diagnostic.
+   * -------------------------------------------------------
+   * 3. SELECT EXACTLY THE REQUESTED PROGRAM
+   * -------------------------------------------------------
    */
+
+  const selected =
+    normalized.movies.find(
+      movie =>
+        String(
+          movie?.externalId ?? ""
+        ) === externalId
+    );
+
+
+  if (!selected) {
+    throw new Error(
+      "Requested NOS external_id is not present in the current catalogue: " +
+      externalId
+    );
+  }
+
 
   const controlledPrograms = [
     selected
   ];
 
 
+  /*
+   * Hard safety assertion.
+   */
+
   if (
     controlledPrograms.length !== 1
   ) {
     throw new Error(
-      "Controlled program synchronization must contain exactly one program"
+      "Controlled synchronization must contain exactly one program"
     );
   }
 
 
   /*
-   * ---------------------------------------------
-   * 3. GENERIC SYNCHRONIZATION
-   * ---------------------------------------------
+   * -------------------------------------------------------
+   * 4. CHECK WHETHER IDENTITY EXISTS BEFORE SYNC
+   * -------------------------------------------------------
+   */
+
+  const existingBefore =
+    await db
+      .prepare(`
+        SELECT
+          ps.program_id,
+          ps.external_id,
+          p.official_title
+
+        FROM program_sources ps
+
+        JOIN programs p
+          ON p.id = ps.program_id
+
+        WHERE
+          ps.source_id = ?
+          AND ps.external_id = ?
+
+        LIMIT 1
+      `)
+      .bind(
+        provider.sourceId,
+        externalId
+      )
+      .first();
+
+
+  /*
+   * -------------------------------------------------------
+   * 5. GENERIC SYNCHRONIZATION
+   * -------------------------------------------------------
    */
 
   const synchronization =
@@ -149,6 +225,49 @@ async function runDiagnostic(
       programs:
         controlledPrograms
     });
+
+
+  /*
+   * -------------------------------------------------------
+   * 6. VERIFY IDENTITY AFTER SYNC
+   * -------------------------------------------------------
+   */
+
+  const existingAfter =
+    await db
+      .prepare(`
+        SELECT
+          ps.program_id,
+          ps.external_id,
+          ps.status AS source_status,
+          ps.last_verified_at,
+
+          p.official_title,
+          p.status AS program_status
+
+        FROM program_sources ps
+
+        JOIN programs p
+          ON p.id = ps.program_id
+
+        WHERE
+          ps.source_id = ?
+          AND ps.external_id = ?
+
+        LIMIT 1
+      `)
+      .bind(
+        provider.sourceId,
+        externalId
+      )
+      .first();
+
+
+  if (!existingAfter) {
+    throw new Error(
+      "Program identity does not exist after synchronization"
+    );
+  }
 
 
   return {
@@ -165,6 +284,9 @@ async function runDiagnostic(
       source_id:
         provider.sourceId
     },
+
+    requested_external_id:
+      externalId,
 
     catalogue: {
       rows:
@@ -194,7 +316,49 @@ async function runDiagnostic(
         selected.contentRating
     },
 
+    database_before: {
+      existed:
+        Boolean(
+          existingBefore
+        ),
+
+      program_id:
+        existingBefore?.program_id ??
+        null,
+
+      title:
+        existingBefore?.official_title ??
+        null
+    },
+
     synchronization,
+
+    database_after: {
+      exists:
+        Boolean(
+          existingAfter
+        ),
+
+      program_id:
+        existingAfter?.program_id ??
+        null,
+
+      title:
+        existingAfter?.official_title ??
+        null,
+
+      program_status:
+        existingAfter?.program_status ??
+        null,
+
+      source_status:
+        existingAfter?.source_status ??
+        null,
+
+      last_verified_at:
+        existingAfter?.last_verified_at ??
+        null
+    },
 
     safety: {
       programs_submitted:
@@ -224,6 +388,23 @@ export async function onRequestGet(
     Date.now();
 
 
+  /*
+   * Read the requested provider identity directly
+   * from the query string.
+   */
+
+  const url =
+    new URL(
+      context.request.url
+    );
+
+
+  const externalId =
+    url.searchParams.get(
+      "external_id"
+    );
+
+
   const result =
     await safeRun({
       db:
@@ -245,13 +426,24 @@ export async function onRequestGet(
         context.request,
 
       reproduction:
-        "GET /api/diagnostics/providers/pt/cinemas/nos/program-sync",
+        externalId
+          ? (
+              "GET /api/diagnostics/providers/pt/cinemas/nos/program-sync" +
+              "?external_id=" +
+              encodeURIComponent(
+                externalId
+              )
+            )
+          : (
+              "GET /api/diagnostics/providers/pt/cinemas/nos/program-sync"
+            ),
 
 
       run:
         () =>
           runDiagnostic(
-            context.env.DB
+            context.env.DB,
+            externalId
           ),
 
 
@@ -271,10 +463,20 @@ export async function onRequestGet(
           if (
             data?.selected_program
               ?.external_id !==
-            TEST_EXTERNAL_ID
+            data?.requested_external_id
           ) {
             throw new Error(
-              "Unexpected program selected for controlled synchronization"
+              "Selected program does not match requested external_id"
+            );
+          }
+
+
+          if (
+            !data?.database_after
+              ?.exists
+          ) {
+            throw new Error(
+              "Program does not exist after synchronization"
             );
           }
 
@@ -299,6 +501,14 @@ export async function onRequestGet(
             data.selected_program
               .external_id,
 
+          program_id:
+            data.database_after
+              .program_id,
+
+          existed_before:
+            data.database_before
+              .existed,
+
           created:
             data.synchronization
               .created,
@@ -318,6 +528,9 @@ export async function onRequestGet(
           null,
 
         synchronization:
+          null,
+
+        database_after:
           null
       }
     });
@@ -336,12 +549,12 @@ export async function onRequestGet(
     next_step:
       result.ok
         ? (
-            "Inspect created, updated and unchanged. " +
-            "If the existing NOS program was recognized correctly, " +
-            "run this diagnostic a second time to verify idempotency."
+            "Inspect database_before, synchronization, and database_after. " +
+            "For an already synchronized unchanged program, expect " +
+            "created=0, updated=0, unchanged=1."
           )
         : (
-            "Do not proceed to full program synchronization."
+            "Stop and inspect the failure before proceeding."
           )
   });
 }
