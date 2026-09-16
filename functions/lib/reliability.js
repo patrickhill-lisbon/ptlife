@@ -1,20 +1,22 @@
 /*
  * PTLife Reliability Framework
- * Version 1
+ * Version 2
  *
  * Centralized error logging and provider-health tracking.
  *
- * This module:
- *   - creates useful error IDs
- *   - fingerprints repeated errors
- *   - sanitizes diagnostic data
- *   - logs errors to D1
- *   - tracks provider health
+ * Features:
+ *   - unique human-readable error IDs
+ *   - duplicate-error fingerprinting
+ *   - secret/sensitive-data sanitization
+ *   - D1 error logging
+ *   - provider health tracking
+ *   - logical GitHub source locations
+ *   - raw Cloudflare stack preservation
+ *   - automatic resolution after provider recovery
  *
- * It does NOT:
- *   - send admin notifications yet
- *   - modify production data
- *   - expose an admin page
+ * Future additions:
+ *   - admin notifications
+ *   - admin error dashboard
  */
 
 
@@ -72,7 +74,7 @@ function safeString(value, maxLength = 10000) {
 
 
 // ============================================================
-// SECRET / SENSITIVE DATA SANITIZATION
+// SANITIZATION
 // ============================================================
 
 const SENSITIVE_KEYS = [
@@ -205,13 +207,6 @@ function parseStackLocation(stack) {
   const lines =
     String(stack).split("\n");
 
-  /*
-   * Typical JavaScript stack examples:
-   *
-   * at functionName (/functions/foo.js:123:45)
-   * at /functions/foo.js:123:45
-   */
-
   for (const line of lines) {
     const match =
       line.match(
@@ -241,7 +236,7 @@ function parseStackLocation(stack) {
 
 
 // ============================================================
-// FINGERPRINT
+// HASH / FINGERPRINT
 // ============================================================
 
 async function sha256(text) {
@@ -272,21 +267,17 @@ async function makeFingerprint({
   stage,
   errorName,
   errorMessage,
-  httpStatus
+  httpStatus,
+  logicalSource
 }) {
-  /*
-   * Deliberately exclude timestamps and
-   * request-specific IDs so repeated instances
-   * of the same problem collapse together.
-   */
-
   const source = [
     provider || "",
     operation || "",
     stage || "",
     errorName || "",
     errorMessage || "",
-    httpStatus || ""
+    httpStatus || "",
+    logicalSource || ""
   ].join("|");
 
   return await sha256(source);
@@ -294,7 +285,7 @@ async function makeFingerprint({
 
 
 // ============================================================
-// NORMALIZE AN ERROR
+// ERROR NORMALIZATION
 // ============================================================
 
 function normalizeError(error) {
@@ -332,8 +323,12 @@ function normalizeError(error) {
 
   return {
     name: "Error",
+
     message:
-      String(error || "Unknown error"),
+      String(
+        error || "Unknown error"
+      ),
+
     stack: null
   };
 }
@@ -357,10 +352,32 @@ export async function logError(
   const errorId =
     makeErrorId();
 
-  const location =
+  const stackLocation =
     parseStackLocation(
       normalized.stack
     );
+
+
+  /*
+   * logicalSource is the source location WE provide.
+   *
+   * Example:
+   *
+   *   functions/providers/nos.js
+   *
+   * This is more useful than Cloudflare's bundled
+   * functionsWorker-xxxxx.js location.
+   */
+
+  const logicalSource =
+    options.sourceFile || null;
+
+  const logicalLine =
+    options.sourceLine ?? null;
+
+  const logicalColumn =
+    options.sourceColumn ?? null;
+
 
   const provider =
     options.provider || null;
@@ -391,27 +408,42 @@ export async function logError(
     );
 
   const context =
-    sanitizeValue(
-      options.context || null
-    );
+    sanitizeValue({
+      ...(options.context || {}),
+
+      /*
+       * Preserve the Cloudflare-generated location
+       * separately when a logical location exists.
+       */
+
+      runtime_source:
+        stackLocation.sourceFile,
+
+      runtime_line:
+        stackLocation.sourceLine,
+
+      runtime_column:
+        stackLocation.sourceColumn
+    });
+
 
   const fingerprint =
     await makeFingerprint({
       provider,
       operation,
       stage,
+
       errorName:
         normalized.name,
+
       errorMessage:
         normalized.message,
-      httpStatus
+
+      httpStatus,
+
+      logicalSource
     });
 
-
-  /*
-   * Look for an existing OPEN error with the
-   * same fingerprint.
-   */
 
   const existing =
     await db
@@ -436,15 +468,36 @@ export async function logError(
         UPDATE system_errors
         SET
           last_occurred_at = ?,
+
           occurrence_count =
             occurrence_count + 1,
+
           updated_at = ?,
+
           http_status =
-            COALESCE(?, http_status),
+            COALESCE(
+              ?,
+              http_status
+            ),
+
           request_url =
-            COALESCE(?, request_url),
+            COALESCE(
+              ?,
+              request_url
+            ),
+
+          reproduction_json =
+            COALESCE(
+              ?,
+              reproduction_json
+            ),
+
           context_json =
-            COALESCE(?, context_json)
+            COALESCE(
+              ?,
+              context_json
+            )
+
         WHERE id = ?
       `)
       .bind(
@@ -452,12 +505,19 @@ export async function logError(
         timestamp,
         httpStatus,
         requestUrl,
+
+        reproduction
+          ? safeString(reproduction)
+          : null,
+
         context
           ? safeString(context)
           : null,
+
         existing.id
       )
       .run();
+
 
     return {
       errorId:
@@ -465,7 +525,8 @@ export async function logError(
 
       fingerprint,
 
-      repeated: true,
+      repeated:
+        true,
 
       occurrenceCount:
         Number(
@@ -476,8 +537,24 @@ export async function logError(
 
 
   /*
-   * New error.
+   * Prefer our logical source.
+   *
+   * If none was supplied, fall back to the
+   * Cloudflare runtime stack location.
    */
+
+  const sourceFile =
+    logicalSource ||
+    stackLocation.sourceFile;
+
+  const sourceLine =
+    logicalLine ??
+    stackLocation.sourceLine;
+
+  const sourceColumn =
+    logicalColumn ??
+    stackLocation.sourceColumn;
+
 
   await db
     .prepare(`
@@ -528,9 +605,9 @@ export async function logError(
       normalized.message,
       normalized.stack,
 
-      location.sourceFile,
-      location.sourceLine,
-      location.sourceColumn,
+      sourceFile,
+      sourceLine,
+      sourceColumn,
 
       requestMethod,
       requestUrl,
@@ -573,6 +650,7 @@ export async function markProviderAttempt(
   const timestamp =
     nowISO();
 
+
   await db
     .prepare(`
       INSERT INTO provider_health (
@@ -595,8 +673,10 @@ export async function markProviderAttempt(
       DO UPDATE SET
         last_attempt_at =
           excluded.last_attempt_at,
+
         last_operation =
           excluded.last_operation,
+
         updated_at =
           excluded.updated_at
     `)
@@ -608,6 +688,40 @@ export async function markProviderAttempt(
       timestamp
     )
     .run();
+}
+
+
+// ============================================================
+// RESOLVE PROVIDER ERRORS
+// ============================================================
+
+async function resolveProviderErrors(
+  db,
+  provider,
+  timestamp
+) {
+  const result =
+    await db
+      .prepare(`
+        UPDATE system_errors
+        SET
+          status = 'resolved',
+          resolved_at = ?,
+          updated_at = ?
+        WHERE provider = ?
+          AND status = 'open'
+      `)
+      .bind(
+        timestamp,
+        timestamp,
+        provider
+      )
+      .run();
+
+  return (
+    result?.meta?.changes ??
+    0
+  );
 }
 
 
@@ -636,6 +750,43 @@ export async function markProviderSuccess(
     sanitizeValue(
       options.metadata || null
     );
+
+
+  /*
+   * First determine whether this represents
+   * recovery from a previous failure.
+   */
+
+  const previous =
+    await db
+      .prepare(`
+        SELECT
+          status,
+          consecutive_failures,
+          last_error_id
+        FROM provider_health
+        WHERE provider = ?
+        LIMIT 1
+      `)
+      .bind(provider)
+      .first();
+
+
+  const wasFailing =
+    previous?.status === "failing";
+
+
+  let resolvedErrorCount = 0;
+
+
+  if (wasFailing) {
+    resolvedErrorCount =
+      await resolveProviderErrors(
+        db,
+        provider,
+        timestamp
+      );
+  }
 
 
   await db
@@ -673,22 +824,32 @@ export async function markProviderSuccess(
       ON CONFLICT(provider)
       DO UPDATE SET
         status = 'healthy',
+
         last_attempt_at =
           excluded.last_attempt_at,
+
         last_success_at =
           excluded.last_success_at,
+
         consecutive_failures = 0,
+
         last_error_id = NULL,
+
         last_http_status =
           excluded.last_http_status,
+
         last_operation =
           excluded.last_operation,
+
         last_duration_ms =
           excluded.last_duration_ms,
+
         last_item_count =
           excluded.last_item_count,
+
         metadata_json =
           excluded.metadata_json,
+
         updated_at =
           excluded.updated_at
     `)
@@ -711,6 +872,24 @@ export async function markProviderSuccess(
       timestamp
     )
     .run();
+
+
+  return {
+    recovered:
+      wasFailing,
+
+    previousFailures:
+      Number(
+        previous?.consecutive_failures ||
+        0
+      ),
+
+    previousErrorId:
+      previous?.last_error_id ||
+      null,
+
+    resolvedErrorCount
+  };
 }
 
 
@@ -768,21 +947,29 @@ export async function markProviderFailure(
       ON CONFLICT(provider)
       DO UPDATE SET
         status = 'failing',
+
         last_attempt_at =
           excluded.last_attempt_at,
+
         last_failure_at =
           excluded.last_failure_at,
+
         consecutive_failures =
           provider_health.consecutive_failures
           + 1,
+
         last_error_id =
           excluded.last_error_id,
+
         last_http_status =
           excluded.last_http_status,
+
         last_operation =
           excluded.last_operation,
+
         last_duration_ms =
           excluded.last_duration_ms,
+
         updated_at =
           excluded.updated_at
     `)
