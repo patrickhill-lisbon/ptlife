@@ -1,5 +1,5 @@
 /*
- * PTLife — Cinemas NOS Controlled Movie Import Test v2
+ * PTLife — Cinemas NOS Controlled Movie Import Test v3
  *
  * Copyright © 2026 Patrick J. Hill
  * All rights reserved.
@@ -8,17 +8,24 @@
  * -------
  * Controlled import of ONE NOS aggregate movie.
  *
- * Performance design:
- *   - fetch catalogue once
- *   - fetch sessions once
- *   - load NOS theater mappings once
- *   - load existing occurrences once
- *   - compare everything in memory
- *   - batch only necessary INSERTs/UPDATEs
- *   - do not write unchanged occurrences
+ * This version adds:
+ *   - resilient provider fetching
+ *   - 8-second timeout
+ *   - one automatic retry
+ *   - batch D1 operations
+ *   - no writes for unchanged occurrences
+ *
+ * This remains a controlled ONE-MOVIE test.
  */
 
-import { safeRun } from "../lib/safe-run.js";
+import {
+  safeRun
+} from "../lib/safe-run.js";
+
+import {
+  fetchProviderJson
+} from "../lib/provider-fetch.js";
+
 
 const SOURCE_ID = 8;
 
@@ -34,71 +41,40 @@ const SESSIONS_BASE =
   "/bin/cinemas/render/" +
   "getMovieSessions.getMovieSessionsAggregator.json";
 
+
+/*
+ * A Odisseia / The Odyssey
+ *
+ * NOS aggregate identity shared by its
+ * 2D and IMAX catalogue variants.
+ */
+
 const TEST_AGGREGATE_ID =
   "1e70190b-5cf3-4937-b361-24f67bdd11d0";
 
 
-function respond(data, status = 200) {
+function respond(
+  data,
+  status = 200
+) {
+
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
       headers: {
         "content-type":
           "application/json; charset=utf-8",
+
         "cache-control":
           "no-store"
       }
     }
   );
-}
-
-
-async function fetchJson(url) {
-
-  const started = Date.now();
-
-  const response =
-    await fetch(url, {
-      headers: {
-        accept: "application/json"
-      }
-    });
-
-  const text =
-    await response.text();
-
-  if (!response.ok) {
-    const error =
-      new Error(
-        `NOS HTTP ${response.status}`
-      );
-
-    error.httpStatus =
-      response.status;
-
-    error.preview =
-      text.slice(0, 1000);
-
-    throw error;
-  }
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "NOS returned invalid JSON"
-    );
-  }
-
-  return {
-    data,
-    status: response.status,
-    durationMs:
-      Date.now() - started
-  };
 }
 
 
@@ -112,11 +88,16 @@ function findMovies(data) {
     data?.movies?.items
   ];
 
+
   for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
+
+    if (
+      Array.isArray(candidate)
+    ) {
       return candidate;
     }
   }
+
 
   throw new Error(
     "NOS movie catalogue array not found"
@@ -133,14 +114,17 @@ function clean(value) {
     return null;
   }
 
+
   const result =
     String(value).trim();
+
 
   return result || null;
 }
 
 
 function getAggregateId(movie) {
+
   return clean(
     movie?.aggregateformatnumber
   );
@@ -155,12 +139,16 @@ function firstValue(
   for (const movie of variants) {
 
     const value =
-      clean(movie?.[field]);
+      clean(
+        movie?.[field]
+      );
+
 
     if (value) {
       return value;
     }
   }
+
 
   return null;
 }
@@ -173,10 +161,12 @@ function getTitle(variants) {
       variants,
       "aggregatetitle"
     ) ||
+
     firstValue(
       variants,
       "title"
     ) ||
+
     "Untitled NOS film"
   );
 }
@@ -192,6 +182,7 @@ function getRuntime(variants) {
         10
       );
 
+
     if (
       Number.isFinite(value) &&
       value > 0
@@ -199,6 +190,7 @@ function getRuntime(variants) {
       return value;
     }
   }
+
 
   return null;
 }
@@ -210,12 +202,16 @@ function absoluteNosUrl(path) {
     return NOS_ORIGIN + "/";
   }
 
+
   try {
+
     return new URL(
       path,
       NOS_ORIGIN
     ).toString();
+
   } catch {
+
     return NOS_ORIGIN + "/";
   }
 }
@@ -227,24 +223,35 @@ function buildStartsAt(
 ) {
 
   const date =
-    clean(operationalDate);
+    clean(
+      operationalDate
+    );
 
   const clock =
-    clean(time);
+    clean(
+      time
+    );
 
-  if (!date || !clock) {
+
+  if (
+    !date ||
+    !clock
+  ) {
     return null;
   }
+
 
   const dateMatch =
     date.match(
       /^(\d{4})-(\d{2})-(\d{2})/
     );
 
+
   const timeMatch =
     clock.match(
       /^(\d{1,2}):(\d{2})/
     );
+
 
   if (
     !dateMatch ||
@@ -253,9 +260,14 @@ function buildStartsAt(
     return null;
   }
 
+
   const hh =
     timeMatch[1]
-      .padStart(2, "0");
+      .padStart(
+        2,
+        "0"
+      );
+
 
   return (
     `${dateMatch[1]}-` +
@@ -268,10 +280,7 @@ function buildStartsAt(
 
 
 /*
- * D1 batch helper.
- *
- * Keeping batches reasonably sized prevents a future
- * full-catalogue importer from creating giant batches.
+ * Run D1 prepared statements in manageable batches.
  */
 
 async function runBatches(
@@ -283,6 +292,7 @@ async function runBatches(
   if (!statements.length) {
     return;
   }
+
 
   for (
     let i = 0;
@@ -304,16 +314,18 @@ async function runImport(db) {
 
   const timing = {};
 
+
   /*
-   * -------------------------------------------------------
-   * 1. CATALOGUE
-   * -------------------------------------------------------
+   * =======================================================
+   * 1. FETCH NOS CATALOGUE
+   * =======================================================
    */
 
   const catalogue =
-    await fetchJson(
+    await fetchProviderJson(
       MOVIES_URL
     );
+
 
   timing.catalogue_fetch_ms =
     catalogue.durationMs;
@@ -334,6 +346,7 @@ async function runImport(db) {
 
 
   if (!variants.length) {
+
     throw new Error(
       "Configured NOS test movie is no longer in the current catalogue"
     );
@@ -341,7 +354,10 @@ async function runImport(db) {
 
 
   const title =
-    getTitle(variants);
+    getTitle(
+      variants
+    );
+
 
   const originalTitle =
     firstValue(
@@ -349,11 +365,13 @@ async function runImport(db) {
       "originaltitle"
     );
 
+
   const classification =
     firstValue(
       variants,
       "classification"
     );
+
 
   const runtime =
     getRuntime(
@@ -362,9 +380,9 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 2. PROGRAM
-   * -------------------------------------------------------
+   * =======================================================
+   * 2. FIND OR UPDATE PROGRAM
+   * =======================================================
    */
 
   const programStarted =
@@ -372,21 +390,22 @@ async function runImport(db) {
 
 
   const existingSource =
-    await db.prepare(`
-      SELECT
-        ps.id AS program_source_id,
-        ps.program_id
-      FROM program_sources ps
-      WHERE
-        ps.source_id = ?
-        AND ps.external_id = ?
-      LIMIT 1
-    `)
-    .bind(
-      SOURCE_ID,
-      TEST_AGGREGATE_ID
-    )
-    .first();
+    await db
+      .prepare(`
+        SELECT
+          ps.id AS program_source_id,
+          ps.program_id
+        FROM program_sources ps
+        WHERE
+          ps.source_id = ?
+          AND ps.external_id = ?
+        LIMIT 1
+      `)
+      .bind(
+        SOURCE_ID,
+        TEST_AGGREGATE_ID
+      )
+      .first();
 
 
   let programId;
@@ -398,75 +417,81 @@ async function runImport(db) {
     programId =
       existingSource.program_id;
 
+
     programAction =
       "updated";
 
 
     await db.batch([
 
-      db.prepare(`
-        UPDATE programs
-        SET
-          official_title = ?,
-          status = 'scheduled',
-          source_id = ?,
-          updated_at =
-            CURRENT_TIMESTAMP
-        WHERE id = ?
-      `)
-      .bind(
-        title,
-        SOURCE_ID,
-        programId
-      ),
+      db
+        .prepare(`
+          UPDATE programs
+          SET
+            official_title = ?,
+            status = 'scheduled',
+            source_id = ?,
+            updated_at =
+              CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+        .bind(
+          title,
+          SOURCE_ID,
+          programId
+        ),
 
-      db.prepare(`
-        UPDATE program_sources
-        SET
-          last_verified_at =
-            CURRENT_TIMESTAMP,
-          status = 'active',
-          updated_at =
-            CURRENT_TIMESTAMP
-        WHERE id = ?
-      `)
-      .bind(
-        existingSource
-          .program_source_id
-      )
+
+      db
+        .prepare(`
+          UPDATE program_sources
+          SET
+            last_verified_at =
+              CURRENT_TIMESTAMP,
+            status = 'active',
+            updated_at =
+              CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+        .bind(
+          existingSource
+            .program_source_id
+        )
 
     ]);
 
   } else {
 
     const inserted =
-      await db.prepare(`
-        INSERT INTO programs (
-          place_id,
-          program_type,
-          official_title,
-          original_language,
-          status,
-          source_id
+      await db
+        .prepare(`
+          INSERT INTO programs (
+            place_id,
+            program_type,
+            official_title,
+            original_language,
+            status,
+            source_id
+          )
+          VALUES (
+            NULL,
+            'film',
+            ?,
+            'pt-PT',
+            'scheduled',
+            ?
+          )
+          RETURNING id
+        `)
+        .bind(
+          title,
+          SOURCE_ID
         )
-        VALUES (
-          NULL,
-          'film',
-          ?,
-          'pt-PT',
-          'scheduled',
-          ?
-        )
-        RETURNING id
-      `)
-      .bind(
-        title,
-        SOURCE_ID
-      )
-      .first();
+        .first();
 
 
     if (!inserted?.id) {
+
       throw new Error(
         "Failed to create PTLife program"
       );
@@ -476,100 +501,119 @@ async function runImport(db) {
     programId =
       inserted.id;
 
+
     programAction =
       "created";
 
 
-    await db.prepare(`
-      INSERT INTO program_sources (
-        program_id,
-        source_id,
-        external_id,
-        source_url,
-        role,
-        last_verified_at,
-        status
+    await db
+      .prepare(`
+        INSERT INTO program_sources (
+          program_id,
+          source_id,
+          external_id,
+          source_url,
+          role,
+          last_verified_at,
+          status
+        )
+        VALUES (
+          ?,
+          ?,
+          ?,
+          ?,
+          'primary',
+          CURRENT_TIMESTAMP,
+          'active'
+        )
+      `)
+      .bind(
+        programId,
+        SOURCE_ID,
+        TEST_AGGREGATE_ID,
+
+        absoluteNosUrl(
+          variants[0]
+            ?.detailurl
+        )
       )
-      VALUES (
-        ?, ?, ?, ?,
-        'primary',
-        CURRENT_TIMESTAMP,
-        'active'
-      )
-    `)
-    .bind(
-      programId,
-      SOURCE_ID,
-      TEST_AGGREGATE_ID,
-      absoluteNosUrl(
-        variants[0]?.detailurl
-      )
-    )
-    .run();
+      .run();
   }
 
 
   /*
-   * Program details.
+   * =======================================================
+   * 3. PROGRAM DETAILS
+   * =======================================================
    */
 
   const details =
-    await db.prepare(`
-      SELECT id
-      FROM program_details
-      WHERE program_id = ?
-      LIMIT 1
-    `)
-    .bind(programId)
-    .first();
+    await db
+      .prepare(`
+        SELECT id
+        FROM program_details
+        WHERE program_id = ?
+        LIMIT 1
+      `)
+      .bind(
+        programId
+      )
+      .first();
 
 
   if (details) {
 
-    await db.prepare(`
-      UPDATE program_details
-      SET
-        original_work_title = ?,
-        work_type = 'film',
-        runtime_minutes = ?,
-        content_rating = ?,
-        source_id = ?,
-        updated_at =
-          CURRENT_TIMESTAMP
-      WHERE program_id = ?
-    `)
-    .bind(
-      originalTitle,
-      runtime,
-      classification,
-      SOURCE_ID,
-      programId
-    )
-    .run();
+    await db
+      .prepare(`
+        UPDATE program_details
+        SET
+          original_work_title = ?,
+          work_type = 'film',
+          runtime_minutes = ?,
+          content_rating = ?,
+          source_id = ?,
+          updated_at =
+            CURRENT_TIMESTAMP
+        WHERE program_id = ?
+      `)
+      .bind(
+        originalTitle,
+        runtime,
+        classification,
+        SOURCE_ID,
+        programId
+      )
+      .run();
 
   } else {
 
-    await db.prepare(`
-      INSERT INTO program_details (
-        program_id,
-        original_work_title,
-        work_type,
-        runtime_minutes,
-        content_rating,
-        source_id
+    await db
+      .prepare(`
+        INSERT INTO program_details (
+          program_id,
+          original_work_title,
+          work_type,
+          runtime_minutes,
+          content_rating,
+          source_id
+        )
+        VALUES (
+          ?,
+          ?,
+          'film',
+          ?,
+          ?,
+          ?
+        )
+      `)
+      .bind(
+        programId,
+        originalTitle,
+        runtime,
+        classification,
+        SOURCE_ID
       )
-      VALUES (
-        ?, ?, 'film', ?, ?, ?
-      )
-    `)
-    .bind(
-      programId,
-      originalTitle,
-      runtime,
-      classification,
-      SOURCE_ID
-    )
-    .run();
+      .run();
   }
 
 
@@ -579,9 +623,9 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 3. SESSIONS
-   * -------------------------------------------------------
+   * =======================================================
+   * 4. FETCH NOS SESSIONS
+   * =======================================================
    */
 
   const sessionsUrl =
@@ -593,7 +637,7 @@ async function runImport(db) {
 
 
   const sessionFetch =
-    await fetchJson(
+    await fetchProviderJson(
       sessionsUrl
     );
 
@@ -611,6 +655,7 @@ async function runImport(db) {
 
 
   if (!days.length) {
+
     throw new Error(
       "NOS returned no session days for the test movie"
     );
@@ -618,9 +663,9 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 4. LOAD ALL THEATER MAPPINGS ONCE
-   * -------------------------------------------------------
+   * =======================================================
+   * 5. LOAD NOS THEATER → PTLIFE PLACE MAPPINGS
+   * =======================================================
    */
 
   const mappingStarted =
@@ -628,23 +673,29 @@ async function runImport(db) {
 
 
   const theaterRows =
-    await db.prepare(`
-      SELECT
-        place_id,
-        external_id
-      FROM place_sources
-      WHERE
-        source_id = ?
-        AND external_id IS NOT NULL
-        AND status = 'active'
-    `)
-    .bind(SOURCE_ID)
-    .all();
+    await db
+      .prepare(`
+        SELECT
+          place_id,
+          external_id
+        FROM place_sources
+        WHERE
+          source_id = ?
+          AND external_id IS NOT NULL
+          AND status = 'active'
+      `)
+      .bind(
+        SOURCE_ID
+      )
+      .all();
 
 
   const theaterMap =
     new Map(
-      (theaterRows.results || [])
+      (
+        theaterRows.results ||
+        []
+      )
         .map(
           row => [
             String(
@@ -662,29 +713,37 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 5. FLATTEN NOS SESSIONS
-   * -------------------------------------------------------
+   * =======================================================
+   * 6. NORMALIZE NOS SESSIONS
+   * =======================================================
    */
 
   const incoming = [];
 
+
   const unresolvedTheaters =
     new Map();
 
+
   let sessionsWithoutUuid = 0;
+
   let sessionsWithoutDate = 0;
 
 
   for (const day of days) {
 
     const theaters =
-      Array.isArray(day?.theaters)
+      Array.isArray(
+        day?.theaters
+      )
         ? day.theaters
         : [];
 
 
-    for (const theater of theaters) {
+    for (
+      const theater
+      of theaters
+    ) {
 
       const theaterUuid =
         clean(
@@ -705,9 +764,12 @@ async function runImport(db) {
         theaterUuid &&
         !placeId
       ) {
+
         unresolvedTheaters.set(
           theaterUuid,
-          clean(theater?.name)
+          clean(
+            theater?.name
+          )
         );
       }
 
@@ -720,30 +782,46 @@ async function runImport(db) {
           : [];
 
 
-      for (const session of sessions) {
+      for (
+        const session
+        of sessions
+      ) {
 
         const externalId =
-          clean(session?.uuid);
+          clean(
+            session?.uuid
+          );
 
 
         if (!externalId) {
+
           sessionsWithoutUuid++;
+
           continue;
         }
 
 
         const startsAt =
           buildStartsAt(
-            session?.operationalDate,
+            session
+              ?.operationalDate,
+
             session?.time
           );
 
 
         if (!startsAt) {
+
           sessionsWithoutDate++;
+
           continue;
         }
 
+
+        /*
+         * Never create an occurrence if its
+         * theater cannot be mapped confidently.
+         */
 
         if (!placeId) {
           continue;
@@ -751,18 +829,27 @@ async function runImport(db) {
 
 
         incoming.push({
+
           externalId,
+
           placeId,
+
           startsAt,
 
           format:
-            clean(session?.format),
+            clean(
+              session?.format
+            ),
 
           version:
-            clean(session?.version),
+            clean(
+              session?.version
+            ),
 
           type:
-            clean(session?.type),
+            clean(
+              session?.type
+            ),
 
           description:
             clean(
@@ -775,6 +862,7 @@ async function runImport(db) {
 
 
   if (!incoming.length) {
+
     throw new Error(
       "NOS returned no importable occurrences"
     );
@@ -782,26 +870,33 @@ async function runImport(db) {
 
 
   /*
-   * Defensive check: provider should not send the
-   * same session UUID twice.
+   * Provider sanity check.
+   *
+   * A NOS session UUID should occur only once in
+   * this aggregate session response.
    */
 
   const incomingIds =
     new Set();
 
 
-  for (const item of incoming) {
+  for (
+    const item
+    of incoming
+  ) {
 
     if (
       incomingIds.has(
         item.externalId
       )
     ) {
+
       throw new Error(
         "NOS returned duplicate session UUID: " +
         item.externalId
       );
     }
+
 
     incomingIds.add(
       item.externalId
@@ -810,11 +905,9 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 6. LOAD EXISTING OCCURRENCES ONCE
-   * -------------------------------------------------------
-   *
-   * We deliberately limit this to the current program.
+   * =======================================================
+   * 7. LOAD EXISTING OCCURRENCES ONCE
+   * =======================================================
    */
 
   const existingStarted =
@@ -822,25 +915,26 @@ async function runImport(db) {
 
 
   const existingRows =
-    await db.prepare(`
-      SELECT
-        id,
-        program_id,
-        place_id,
-        starts_at,
-        status,
-        external_id
-      FROM program_occurrences
-      WHERE
-        source_id = ?
-        AND program_id = ?
-        AND external_id IS NOT NULL
-    `)
-    .bind(
-      SOURCE_ID,
-      programId
-    )
-    .all();
+    await db
+      .prepare(`
+        SELECT
+          id,
+          program_id,
+          place_id,
+          starts_at,
+          status,
+          external_id
+        FROM program_occurrences
+        WHERE
+          source_id = ?
+          AND program_id = ?
+          AND external_id IS NOT NULL
+      `)
+      .bind(
+        SOURCE_ID,
+        programId
+      )
+      .all();
 
 
   timing.existing_occurrences_read_ms =
@@ -850,7 +944,10 @@ async function runImport(db) {
 
   const existingById =
     new Map(
-      (existingRows.results || [])
+      (
+        existingRows.results ||
+        []
+      )
         .map(
           row => [
             String(
@@ -863,17 +960,22 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 7. COMPARE IN MEMORY
-   * -------------------------------------------------------
+   * =======================================================
+   * 8. COMPARE NOS WITH D1 IN MEMORY
+   * =======================================================
    */
 
   const creates = [];
+
   const updates = [];
+
   const unchanged = [];
 
 
-  for (const item of incoming) {
+  for (
+    const item
+    of incoming
+  ) {
 
     const existing =
       existingById.get(
@@ -883,29 +985,49 @@ async function runImport(db) {
 
     if (!existing) {
 
-      creates.push(item);
+      creates.push(
+        item
+      );
 
       continue;
     }
 
 
     const same =
-      Number(existing.program_id) ===
-        Number(programId) &&
 
-      Number(existing.place_id) ===
-        Number(item.placeId) &&
+      Number(
+        existing.program_id
+      ) ===
+        Number(
+          programId
+        ) &&
 
-      String(existing.starts_at) ===
-        String(item.startsAt) &&
+      Number(
+        existing.place_id
+      ) ===
+        Number(
+          item.placeId
+        ) &&
+
+      String(
+        existing.starts_at
+      ) ===
+        String(
+          item.startsAt
+        ) &&
 
       existing.status ===
         "scheduled";
 
 
     if (same) {
-      unchanged.push(item);
+
+      unchanged.push(
+        item
+      );
+
     } else {
+
       updates.push({
         ...item,
         id:
@@ -916,77 +1038,86 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
-   * 8. BATCH ONLY ACTUAL WRITES
-   * -------------------------------------------------------
+   * =======================================================
+   * 9. BATCH ONLY NECESSARY WRITES
+   * =======================================================
    */
 
   const writeStarted =
     Date.now();
 
+
   const statements = [];
 
 
-  for (const item of creates) {
+  for (
+    const item
+    of creates
+  ) {
 
     statements.push(
 
-      db.prepare(`
-        INSERT INTO program_occurrences (
-          program_id,
-          starts_at,
-          timezone,
-          status,
-          source_id,
-          place_id,
-          external_id
+      db
+        .prepare(`
+          INSERT INTO program_occurrences (
+            program_id,
+            starts_at,
+            timezone,
+            status,
+            source_id,
+            place_id,
+            external_id
+          )
+          VALUES (
+            ?,
+            ?,
+            'Europe/Lisbon',
+            'scheduled',
+            ?,
+            ?,
+            ?
+          )
+        `)
+        .bind(
+          programId,
+          item.startsAt,
+          SOURCE_ID,
+          item.placeId,
+          item.externalId
         )
-        VALUES (
-          ?,
-          ?,
-          'Europe/Lisbon',
-          'scheduled',
-          ?,
-          ?,
-          ?
-        )
-      `)
-      .bind(
-        programId,
-        item.startsAt,
-        SOURCE_ID,
-        item.placeId,
-        item.externalId
-      )
 
     );
   }
 
 
-  for (const item of updates) {
+  for (
+    const item
+    of updates
+  ) {
 
     statements.push(
 
-      db.prepare(`
-        UPDATE program_occurrences
-        SET
-          program_id = ?,
-          place_id = ?,
-          starts_at = ?,
-          timezone =
-            'Europe/Lisbon',
-          status =
-            'scheduled',
-          updated_at =
-            CURRENT_TIMESTAMP
-        WHERE id = ?
-      `)
-      .bind(
-        programId,
-        item.placeId,
-        item.startsAt,
-        item.id
-      )
+      db
+        .prepare(`
+          UPDATE program_occurrences
+          SET
+            program_id = ?,
+            place_id = ?,
+            starts_at = ?,
+            timezone =
+              'Europe/Lisbon',
+            status =
+              'scheduled',
+            updated_at =
+              CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+        .bind(
+          programId,
+          item.placeId,
+          item.startsAt,
+          item.id
+        )
 
     );
   }
@@ -1005,9 +1136,9 @@ async function runImport(db) {
 
 
   /*
-   * -------------------------------------------------------
+   * =======================================================
    * RESULT
-   * -------------------------------------------------------
+   * =======================================================
    */
 
   return {
@@ -1016,6 +1147,9 @@ async function runImport(db) {
       true,
 
     optimized:
+      true,
+
+    resilient_fetch:
       true,
 
     source_id:
@@ -1033,20 +1167,40 @@ async function runImport(db) {
       matching_variants:
         variants.length,
 
+      fetch: {
+        duration_ms:
+          catalogue.durationMs,
+
+        retried:
+          catalogue.retried,
+
+        attempts:
+          catalogue.attempts
+      },
+
       variants:
         variants.map(
           movie => ({
+
             uuid:
-              clean(movie?.uuid),
+              clean(
+                movie?.uuid
+              ),
 
             title:
-              clean(movie?.title),
+              clean(
+                movie?.title
+              ),
 
             format:
-              clean(movie?.format),
+              clean(
+                movie?.format
+              ),
 
             version:
-              clean(movie?.version)
+              clean(
+                movie?.version
+              )
           })
         )
     },
@@ -1097,7 +1251,18 @@ async function runImport(db) {
         sessionsWithoutUuid,
 
       skipped_without_date:
-        sessionsWithoutDate
+        sessionsWithoutDate,
+
+      fetch: {
+        duration_ms:
+          sessionFetch.durationMs,
+
+        retried:
+          sessionFetch.retried,
+
+        attempts:
+          sessionFetch.attempts
+      }
     },
 
 
@@ -1132,7 +1297,13 @@ async function runImport(db) {
         false,
 
       unchanged_occurrences_written:
-        false
+        false,
+
+      provider_timeout_ms:
+        8000,
+
+      provider_retries:
+        1
     }
   };
 }
@@ -1156,7 +1327,7 @@ export async function onRequestGet(
         "cinemas_nos",
 
       operation:
-        "controlled_movie_import_v2",
+        "controlled_movie_import_v3",
 
       stage:
         "nos_movie_import",
@@ -1171,6 +1342,7 @@ export async function onRequestGet(
         "GET /api/nos-import-test",
 
       context: {
+
         source_id:
           SOURCE_ID,
 
@@ -1189,7 +1361,12 @@ export async function onRequestGet(
       validate:
         result => {
 
-          if (!result?.program?.id) {
+          if (
+            !result
+              ?.program
+              ?.id
+          ) {
+
             throw new Error(
               "NOS importer did not produce a program ID"
             );
@@ -1197,9 +1374,11 @@ export async function onRequestGet(
 
 
           if (
-            result.sessions
+            result
+              ?.sessions
               ?.incoming <= 0
           ) {
+
             throw new Error(
               "NOS importer produced no occurrences"
             );
@@ -1212,8 +1391,10 @@ export async function onRequestGet(
 
       getItemCount:
         result =>
-          result.sessions
-            ?.incoming ?? 0,
+          result
+            ?.sessions
+            ?.incoming ??
+          0,
 
 
       getMetadata:
@@ -1235,12 +1416,25 @@ export async function onRequestGet(
             result.sessions.updated,
 
           unchanged:
-            result.sessions.unchanged
+            result.sessions.unchanged,
+
+          catalogue_retried:
+            result.catalogue
+              .fetch
+              .retried,
+
+          sessions_retried:
+            result.sessions
+              .fetch
+              .retried
         }),
 
 
       fallbackData: {
-        program: null,
+
+        program:
+          null,
+
         sessions: {
           items: []
         }
@@ -1256,13 +1450,14 @@ export async function onRequestGet(
       true,
 
     total_request_ms:
-      Date.now() - started,
+      Date.now() -
+      started,
 
     next_step:
       result.ok
         ? (
-            "Verify created=0, updated=0 and unchanged=442. " +
-            "If so, controlled NOS movie import is idempotent."
+            "Inspect fetch attempts, timing, and idempotency. " +
+            "Do not expand to the full NOS catalogue yet."
           )
         : (
             "Inspect system_errors and provider_health before proceeding."
