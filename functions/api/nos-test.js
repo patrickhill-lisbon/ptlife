@@ -108,12 +108,12 @@ function valueByName(obj, wanted) {
 
 function getAggregateId(movie) {
   return (
+    valueByName(movie, "aggregateformatnumber") ||
     valueByName(movie, "aggregateMovieId") ||
     valueByName(movie, "aggregateMovieID") ||
     null
   );
 }
-
 
 function getTitle(movie) {
   return (
