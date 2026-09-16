@@ -1,37 +1,18 @@
 /*
- * PTLife — Cinemas NOS Colombo Schedule Test v4
- *
- * Diagnostic only.
+ * PTLife — Cinemas NOS Deduplicated Diagnostic
  *
  * Purpose:
- *   Determine whether PTLife can build a complete schedule
- *   for one NOS cinema using the proven NOS APIs.
+ * 1. Fetch NOS movie catalogue
+ * 2. Deduplicate movies by aggregateformatnumber
+ * 3. Fetch each unique movie's sessions only once
+ * 4. Extract Colombo sessions
+ * 5. Deduplicate sessions
+ * 6. Measure performance
  *
- * Test cinema:
- *   Cinemas NOS Colombo
- *
- * Method:
- *   1. Fetch current NOS movie catalogue.
- *   2. Find aggregate movie IDs.
- *   3. Fetch session data for every movie.
- *   4. Run requests in controlled batches.
- *   5. Keep only Colombo sessions.
- *   6. Report timing and failures.
- *
- * IMPORTANT:
- *   - NO program writes
- *   - NO occurrence writes
- *   - NO place writes
- *   - reliability logging only
+ * NO D1 WRITES.
  */
 
-import {
-  safeRun
-} from "../lib/safe-run.js";
-
-
-const NOS_ORIGIN =
-  "https://www.cinemas.nos.pt";
+const NOS_ORIGIN = "https://www.cinemas.nos.pt";
 
 const MOVIES_URL =
   NOS_ORIGIN +
@@ -42,195 +23,56 @@ const SESSIONS_BASE =
   "/bin/cinemas/render/" +
   "getMovieSessions.getMovieSessionsAggregator.json";
 
-
-/*
- * Known from the NOS theatre list.
- */
-
-const TARGET_THEATER = {
-  uuid:
-    "e0ea3044-4a1b-46b1-bca2-69fd8eae16d7",
-
-  name:
-    "Cinemas NOS Colombo",
-
-  city:
-    "Lisboa"
-};
-
+const COLOMBO_ID =
+  "e0ea3044-4a1b-46b1-bca2-69fd8eae16d7";
 
 const BATCH_SIZE = 5;
 
-
-// ============================================================
-// RESPONSE
-// ============================================================
 
 function respond(data, status = 200) {
   return new Response(
     JSON.stringify(data, null, 2),
     {
       status,
-
       headers: {
         "content-type":
           "application/json; charset=utf-8",
-
         "cache-control":
-          "no-store"
-      }
+          "no-store",
+      },
     }
   );
 }
 
 
-// ============================================================
-// PROVIDER ERROR
-// ============================================================
-
-function providerError(
-  message,
-  {
-    stage = null,
-    httpStatus = null,
-    details = null
-  } = {}
-) {
-  const error =
-    new Error(message);
-
-  if (stage) {
-    error.providerStage =
-      stage;
-  }
-
-  if (httpStatus !== null) {
-    error.httpStatus =
-      httpStatus;
-  }
-
-  if (details !== null) {
-    error.details =
-      details;
-  }
-
-  return error;
-}
-
-
-// ============================================================
-// FETCH JSON
-// ============================================================
-
 async function getJson(url) {
-  const startedAt =
-    Date.now();
+  const started = Date.now();
 
-  let response;
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+    },
+  });
 
+  const text = await response.text();
 
-  try {
-    response =
-      await fetch(url, {
-        headers: {
-          accept:
-            "application/json"
-        }
-      });
-  } catch (error) {
-    throw providerError(
-      "NOS network request failed",
-      {
-        stage:
-          "network_fetch",
-
-        details: {
-          url,
-
-          original_error:
-            error?.message ||
-            String(error)
-        }
-      }
-    );
-  }
-
-
-  const text =
-    await response.text();
-
-  const durationMs =
-    Date.now() - startedAt;
-
-
-  if (!response.ok) {
-    throw providerError(
-      `NOS returned HTTP ${response.status}`,
-      {
-        stage:
-          "http_response",
-
-        httpStatus:
-          response.status,
-
-        details: {
-          url,
-
-          duration_ms:
-            durationMs,
-
-          preview:
-            text.slice(0, 1000)
-        }
-      }
-    );
-  }
-
-
-  let data;
-
+  let data = null;
 
   try {
-    data =
-      JSON.parse(text);
+    data = JSON.parse(text);
   } catch {
-    throw providerError(
-      "NOS returned invalid JSON",
-      {
-        stage:
-          "json_parse",
-
-        httpStatus:
-          response.status,
-
-        details: {
-          url,
-
-          duration_ms:
-            durationMs,
-
-          preview:
-            text.slice(0, 1000)
-        }
-      }
-    );
+    // caller handles invalid JSON
   }
-
 
   return {
-    status:
-      response.status,
-
-    durationMs,
-
-    data
+    ok: response.ok,
+    status: response.status,
+    data,
+    preview: text.slice(0, 1000),
+    duration_ms: Date.now() - started,
   };
 }
 
-
-// ============================================================
-// MOVIE HELPERS
-// ============================================================
 
 function findMovies(data) {
   const candidates = [
@@ -238,9 +80,8 @@ function findMovies(data) {
     data?.data?.moviesList?.items,
     data?.data?.movies?.items,
     data?.movieList?.items,
-    data?.movies?.items
+    data?.movies?.items,
   ];
-
 
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
@@ -248,36 +89,22 @@ function findMovies(data) {
     }
   }
 
-
   return null;
 }
 
 
 function valueByName(obj, wanted) {
-  if (
-    !obj ||
-    typeof obj !== "object"
-  ) {
+  if (!obj || typeof obj !== "object") {
     return null;
   }
 
+  const target = wanted.toLowerCase();
 
-  const target =
-    wanted.toLowerCase();
-
-
-  for (
-    const [key, value]
-    of Object.entries(obj)
-  ) {
-    if (
-      key.toLowerCase() ===
-      target
-    ) {
+  for (const [key, value] of Object.entries(obj)) {
+    if (key.toLowerCase() === target) {
       return value;
     }
   }
-
 
   return null;
 }
@@ -285,21 +112,9 @@ function valueByName(obj, wanted) {
 
 function getAggregateId(movie) {
   return (
-    valueByName(
-      movie,
-      "aggregateformatnumber"
-    ) ||
-
-    valueByName(
-      movie,
-      "aggregateMovieId"
-    ) ||
-
-    valueByName(
-      movie,
-      "aggregateMovieID"
-    ) ||
-
+    valueByName(movie, "aggregateformatnumber") ||
+    valueByName(movie, "aggregateMovieId") ||
+    valueByName(movie, "aggregateMovieID") ||
     null
   );
 }
@@ -307,381 +122,326 @@ function getAggregateId(movie) {
 
 function getTitle(movie) {
   return (
-    valueByName(
-      movie,
-      "title"
-    ) ||
-
-    valueByName(
-      movie,
-      "name"
-    ) ||
-
-    valueByName(
-      movie,
-      "originalTitle"
-    ) ||
-
+    valueByName(movie, "aggregatetitle") ||
+    valueByName(movie, "title") ||
+    valueByName(movie, "name") ||
+    valueByName(movie, "originalTitle") ||
     null
   );
 }
 
 
-// ============================================================
-// THEATER MATCHING
-// ============================================================
-
-function getTheaterId(theater) {
-  return (
-    theater?.theaterId ||
-    theater?.theaterID ||
-    theater?.uuid ||
-    null
-  );
-}
-
-
-function isTargetTheater(theater) {
-  const id =
-    getTheaterId(theater);
-
-
-  /*
-   * UUID is our primary match.
-   */
-
-  if (
-    id === TARGET_THEATER.uuid
-  ) {
-    return true;
-  }
-
-
-  /*
-   * Name fallback is useful diagnostically in case NOS
-   * changes the identifier field in the session response.
-   */
-
-  const name =
-    String(
-      theater?.name || ""
-    )
-      .trim()
-      .toLowerCase();
-
-
-  return (
-    name ===
-    TARGET_THEATER.name
-      .toLowerCase()
-  );
-}
-
-
-// ============================================================
-// FETCH ONE MOVIE'S SESSIONS
-// ============================================================
-
-async function fetchMovieSessions(movie) {
-  const aggregateId =
-    getAggregateId(movie);
-
-  const title =
-    getTitle(movie);
-
-
-  if (!aggregateId) {
-    return {
-      ok: false,
-
-      title,
-
-      movie_uuid:
-        valueByName(
-          movie,
-          "uuid"
-        ),
-
-      aggregate_movie_id:
-        null,
-
-      error:
-        "aggregate_movie_id_missing"
-    };
-  }
-
-
-  const sessionsUrl =
-    SESSIONS_BASE +
-    "?aggregateMovieId=" +
-    encodeURIComponent(
-      aggregateId
-    );
-
-
-  try {
-    const response =
-      await getJson(
-        sessionsUrl
-      );
-
-
-    if (
-      !Array.isArray(
-        response.data?.days
-      )
-    ) {
-      return {
-        ok: false,
-
-        title,
-
-        movie_uuid:
-          valueByName(
-            movie,
-            "uuid"
-          ),
-
-        aggregate_movie_id:
-          aggregateId,
-
-        duration_ms:
-          response.durationMs,
-
-        error:
-          "days_array_missing",
-
-        response_fields:
-          Object.keys(
-            response.data || {}
-          )
-      };
-    }
-
-
-    return {
-      ok: true,
-
-      title,
-
-      movie_uuid:
-        valueByName(
-          movie,
-          "uuid"
-        ),
-
-      aggregate_movie_id:
-        aggregateId,
-
-      duration_ms:
-        response.durationMs,
-
-      days:
-        response.data.days
-    };
-
-
-  } catch (error) {
-    return {
-      ok: false,
-
-      title,
-
-      movie_uuid:
-        valueByName(
-          movie,
-          "uuid"
-        ),
-
-      aggregate_movie_id:
-        aggregateId,
-
-      error:
-        error?.message ||
-        String(error),
-
-      stage:
-        error?.providerStage ||
-        null,
-
-      http_status:
-        error?.httpStatus ||
-        null
-    };
-  }
-}
-
-
-// ============================================================
-// BATCH RUNNER
-// ============================================================
-
-async function fetchInBatches(
-  movies,
-  batchSize
-) {
+/*
+ * Run promises in controlled batches.
+ */
+async function runBatches(items, batchSize, worker) {
   const results = [];
 
-
   for (
-    let index = 0;
-    index < movies.length;
-    index += batchSize
+    let i = 0;
+    i < items.length;
+    i += batchSize
   ) {
     const batch =
-      movies.slice(
-        index,
-        index + batchSize
-      );
-
+      items.slice(i, i + batchSize);
 
     const batchResults =
       await Promise.all(
-        batch.map(
-          fetchMovieSessions
-        )
+        batch.map(worker)
       );
 
-
-    results.push(
-      ...batchResults
-    );
+    results.push(...batchResults);
   }
-
 
   return results;
 }
 
 
-// ============================================================
-// NORMALIZE COLOMBO SESSIONS
-// ============================================================
+export async function onRequestGet(context) {
+  const totalStarted = Date.now();
 
-function collectTargetSessions(
-  movieResults
-) {
-  const sessions = [];
+  /*
+   * -----------------------------------------
+   * STEP 1 — FETCH CATALOGUE
+   * -----------------------------------------
+   */
 
-  const moviesAtTheater =
-    new Map();
+  let catalogue;
+
+  try {
+    catalogue = await getJson(MOVIES_URL);
+  } catch (error) {
+    return respond({
+      ok: false,
+      graceful_failure: true,
+      stage: "catalogue_fetch_exception",
+      error: String(error),
+    });
+  }
 
 
-  for (
-    const movieResult
-    of movieResults
-  ) {
-    if (!movieResult.ok) {
+  if (!catalogue.ok || !catalogue.data) {
+    return respond({
+      ok: false,
+      graceful_failure: true,
+      stage: "catalogue_failure",
+      http_status: catalogue.status,
+      preview: catalogue.preview,
+    });
+  }
+
+
+  const movies =
+    findMovies(catalogue.data);
+
+
+  if (!movies) {
+    return respond({
+      ok: false,
+      graceful_failure: true,
+      stage: "movie_array_not_found",
+      preview:
+        JSON.stringify(
+          catalogue.data
+        ).slice(0, 3000),
+    });
+  }
+
+
+  /*
+   * -----------------------------------------
+   * STEP 2 — GROUP BY AGGREGATE MOVIE ID
+   * -----------------------------------------
+   *
+   * NOS may expose several catalogue records
+   * for the same underlying movie:
+   *
+   * normal
+   * IMAX
+   * ATMOS
+   * 3D
+   * XL Vision
+   * etc.
+   *
+   * We only need ONE sessions request for
+   * each aggregate movie ID.
+   */
+
+  const aggregateMap = new Map();
+
+  let moviesWithoutAggregateId = 0;
+
+
+  for (const movie of movies) {
+    const aggregateId =
+      getAggregateId(movie);
+
+    if (!aggregateId) {
+      moviesWithoutAggregateId++;
       continue;
     }
 
 
-    for (
-      const day
-      of movieResult.days
-    ) {
+    if (!aggregateMap.has(aggregateId)) {
+      aggregateMap.set(
+        aggregateId,
+        {
+          aggregate_id:
+            aggregateId,
+
+          title:
+            getTitle(movie),
+
+          catalogue_variants: [],
+        }
+      );
+    }
+
+
+    aggregateMap
+      .get(aggregateId)
+      .catalogue_variants
+      .push({
+        uuid:
+          valueByName(movie, "uuid"),
+
+        title:
+          valueByName(movie, "title"),
+
+        format:
+          valueByName(movie, "format"),
+
+        version:
+          valueByName(movie, "version"),
+      });
+  }
+
+
+  const uniqueMovies =
+    Array.from(
+      aggregateMap.values()
+    );
+
+
+  /*
+   * -----------------------------------------
+   * STEP 3 — FETCH EACH UNIQUE MOVIE ONCE
+   * -----------------------------------------
+   */
+
+  const fetchResults =
+    await runBatches(
+      uniqueMovies,
+      BATCH_SIZE,
+
+      async movie => {
+        const url =
+          SESSIONS_BASE +
+          "?aggregateMovieId=" +
+          encodeURIComponent(
+            movie.aggregate_id
+          );
+
+        try {
+          const result =
+            await getJson(url);
+
+          return {
+            movie,
+            url,
+            ...result,
+          };
+        } catch (error) {
+          return {
+            movie,
+            url,
+            ok: false,
+            status: null,
+            data: null,
+            duration_ms: null,
+            error: String(error),
+          };
+        }
+      }
+    );
+
+
+  /*
+   * -----------------------------------------
+   * STEP 4 — EXTRACT COLOMBO SESSIONS
+   * -----------------------------------------
+   */
+
+  const rawSessions = [];
+
+  const failures = [];
+
+
+  for (const result of fetchResults) {
+
+    if (!result.ok || !result.data) {
+      failures.push({
+        aggregate_movie_id:
+          result.movie.aggregate_id,
+
+        title:
+          result.movie.title,
+
+        status:
+          result.status,
+
+        error:
+          result.error || null,
+
+        preview:
+          result.preview || null,
+      });
+
+      continue;
+    }
+
+
+    const days =
+      Array.isArray(result.data?.days)
+        ? result.data.days
+        : [];
+
+
+    for (const day of days) {
+
       const theaters =
-        Array.isArray(
-          day?.theaters
-        )
+        Array.isArray(day?.theaters)
           ? day.theaters
           : [];
 
 
-      for (
-        const theater
-        of theaters
-      ) {
-        if (
-          !isTargetTheater(
-            theater
-          )
-        ) {
+      for (const theater of theaters) {
+
+        const theaterId =
+          theater?.theaterId ||
+          theater?.theaterID ||
+          null;
+
+
+        if (theaterId !== COLOMBO_ID) {
           continue;
         }
 
 
-        const theaterSessions =
-          Array.isArray(
-            theater?.sessions
-          )
+        const sessions =
+          Array.isArray(theater?.sessions)
             ? theater.sessions
             : [];
 
 
-        if (
-          theaterSessions.length >
-          0
-        ) {
-          moviesAtTheater.set(
-            movieResult.aggregate_movie_id,
-            movieResult.title
-          );
-        }
+        for (const session of sessions) {
 
-
-        for (
-          const session
-          of theaterSessions
-        ) {
-          sessions.push({
-            movie:
-              movieResult.title,
-
-            movie_uuid:
-              movieResult.movie_uuid,
-
+          rawSessions.push({
             aggregate_movie_id:
-              movieResult
-                .aggregate_movie_id,
+              result.movie.aggregate_id,
+
+            movie:
+              result.movie.title,
+
+            catalogue_variants:
+              result.movie
+                .catalogue_variants
+                .length,
 
             day_name:
-              day?.name ||
-              null,
+              day?.name || null,
 
             theater:
-              theater?.name ||
-              TARGET_THEATER.name,
+              theater?.name || null,
 
             theater_id:
-              getTheaterId(
-                theater
-              ),
+              theaterId,
 
             session_uuid:
-              session?.uuid ||
-              null,
+              session?.uuid || null,
 
             time:
-              session?.time ||
-              null,
+              session?.time || null,
 
             operational_date:
-              session
-                ?.operationalDate ||
+              session?.operationalDate ||
               null,
 
             room:
-              session?.room ||
-              session?.roomName ||
-              session?.screen ||
+              session?.room || null,
+
+            description:
+              session?.description ||
               null,
 
             type:
-              session?.type ||
-              null,
-
-            description:
-              session
-                ?.description ||
-              null,
+              session?.type || null,
 
             format:
-              session?.format ||
-              null,
+              session?.format || null,
 
             version:
-              session?.version ||
-              null
+              session?.version || null,
           });
         }
       }
@@ -689,193 +449,90 @@ function collectTargetSessions(
   }
 
 
-  return {
-    sessions,
-
-    movieCount:
-      moviesAtTheater.size
-  };
-}
-
-
-// ============================================================
-// MAIN NOS DIAGNOSTIC
-// ============================================================
-
-async function runNosColomboDiagnostic() {
-  const totalStartedAt =
-    Date.now();
-
-
   /*
-   * --------------------------------------------------------
-   * STEP 1 — CATALOGUE
-   * --------------------------------------------------------
-   */
-
-  const catalogueStartedAt =
-    Date.now();
-
-
-  const catalogue =
-    await getJson(
-      MOVIES_URL
-    );
-
-
-  const catalogueStageMs =
-    Date.now() -
-    catalogueStartedAt;
-
-
-  const movies =
-    findMovies(
-      catalogue.data
-    );
-
-
-  if (!movies) {
-    throw providerError(
-      "NOS movie array was not found",
-      {
-        stage:
-          "catalogue_schema",
-
-        details: {
-          fields:
-            Object.keys(
-              catalogue.data ||
-              {}
-            )
-        }
-      }
-    );
-  }
-
-
-  if (movies.length === 0) {
-    throw providerError(
-      "NOS returned an empty movie catalogue",
-      {
-        stage:
-          "catalogue_empty"
-      }
-    );
-  }
-
-
-  /*
-   * --------------------------------------------------------
-   * STEP 2 — SESSION REQUESTS
-   * --------------------------------------------------------
-   */
-
-  const sessionStageStartedAt =
-    Date.now();
-
-
-  const movieResults =
-    await fetchInBatches(
-      movies,
-      BATCH_SIZE
-    );
-
-
-  const sessionStageMs =
-    Date.now() -
-    sessionStageStartedAt;
-
-
-  /*
-   * --------------------------------------------------------
-   * STEP 3 — ANALYZE REQUEST RESULTS
-   * --------------------------------------------------------
-   */
-
-  const successfulRequests =
-    movieResults.filter(
-      result => result.ok
-    );
-
-
-  const failedRequests =
-    movieResults.filter(
-      result => !result.ok
-    );
-
-
-  /*
-   * --------------------------------------------------------
-   * STEP 4 — EXTRACT COLOMBO
-   * --------------------------------------------------------
-   */
-
-  const target =
-    collectTargetSessions(
-      movieResults
-    );
-
-
-  /*
-   * A cinema legitimately might have zero sessions at some
-   * future point, so don't automatically classify that as
-   * provider failure.
+   * -----------------------------------------
+   * STEP 5 — DEDUPLICATE SESSIONS
+   * -----------------------------------------
    *
-   * But if EVERY movie session request failed, the provider
-   * clearly did not work.
+   * Primary key:
+   * session UUID.
+   *
+   * Fallback key is included in case NOS ever
+   * returns a session without a UUID.
    */
 
-  if (
-    successfulRequests.length ===
-    0
-  ) {
-    throw providerError(
-      "All NOS movie session requests failed",
-      {
-        stage:
-          "sessions_all_failed",
+  const sessionMap =
+    new Map();
 
-        details: {
-          movie_count:
-            movies.length,
 
-          failures:
-            failedRequests.slice(
-              0,
-              10
-            )
-        }
-      }
-    );
+  for (const session of rawSessions) {
+
+    const key =
+      session.session_uuid ||
+      [
+        session.aggregate_movie_id,
+        session.operational_date,
+        session.time,
+        session.theater_id,
+        session.description,
+      ].join("|");
+
+
+    if (!sessionMap.has(key)) {
+      sessionMap.set(
+        key,
+        session
+      );
+    }
   }
 
 
+  const uniqueSessions =
+    Array.from(
+      sessionMap.values()
+    );
+
+
   /*
-   * --------------------------------------------------------
-   * TIMING STATISTICS
-   * --------------------------------------------------------
+   * -----------------------------------------
+   * STEP 6 — SORT
+   * -----------------------------------------
+   */
+
+  uniqueSessions.sort(
+    (a, b) => {
+
+      const dateA =
+        `${a.operational_date || ""} ${a.time || ""}`;
+
+      const dateB =
+        `${b.operational_date || ""} ${b.time || ""}`;
+
+      return dateA.localeCompare(dateB);
+    }
+  );
+
+
+  /*
+   * -----------------------------------------
+   * STEP 7 — TIMING STATISTICS
+   * -----------------------------------------
    */
 
   const requestDurations =
-    successfulRequests
-      .map(
-        result =>
-          result.duration_ms
-      )
+    fetchResults
+      .map(r => r.duration_ms)
       .filter(
-        value =>
-          Number.isFinite(
-            value
-          )
+        n => Number.isFinite(n)
       );
 
 
   const slowestRequests =
-    [...successfulRequests]
+    fetchResults
       .filter(
-        result =>
+        r =>
           Number.isFinite(
-            result.duration_ms
+            r.duration_ms
           )
       )
       .sort(
@@ -884,399 +541,125 @@ async function runNosColomboDiagnostic() {
           a.duration_ms
       )
       .slice(0, 10)
-      .map(
-        result => ({
-          movie:
-            result.title,
+      .map(r => ({
+        title:
+          r.movie.title,
 
-          duration_ms:
-            result.duration_ms
-        })
-      );
+        aggregate_movie_id:
+          r.movie.aggregate_id,
 
+        duration_ms:
+          r.duration_ms,
 
-  const averageRequestMs =
-    requestDurations.length
-      ? Math.round(
-          requestDurations.reduce(
-            (sum, value) =>
-              sum + value,
-            0
-          ) /
-          requestDurations.length
-        )
-      : null;
+        status:
+          r.status,
+      }));
 
 
   /*
-   * Sort schedule primarily by operational date and time.
+   * -----------------------------------------
+   * SUCCESS
+   * -----------------------------------------
    */
 
-  target.sessions.sort(
-    (a, b) => {
-      const aKey =
-        `${a.operational_date || ""} ${a.time || ""}`;
+  return respond({
+    ok: failures.length === 0,
 
-      const bKey =
-        `${b.operational_date || ""} ${b.time || ""}`;
+    diagnostic_test: true,
 
+    writes_to_d1: false,
 
-      return aKey.localeCompare(
-        bKey
-      );
-    }
-  );
+    test:
+      "NOS deduplicated Colombo schedule",
 
-
-  return {
-    fetched_at:
-      new Date()
-        .toISOString(),
-
-    writes_to_d1:
-      false,
-
-    target_theater:
-      TARGET_THEATER,
+    duration_ms:
+      Date.now() - totalStarted,
 
     configuration: {
       batch_size:
-        BATCH_SIZE
+        BATCH_SIZE,
+
+      target_theater_id:
+        COLOMBO_ID,
     },
 
     catalogue: {
       http_status:
         catalogue.status,
 
-      movie_count:
+      fetch_duration_ms:
+        catalogue.duration_ms,
+
+      catalogue_records:
         movies.length,
 
-      movies_with_aggregate_id:
-        movies.filter(
-          movie =>
-            Boolean(
-              getAggregateId(
-                movie
-              )
-            )
-        ).length
+      records_without_aggregate_id:
+        moviesWithoutAggregateId,
+
+      unique_aggregate_movies:
+        uniqueMovies.length,
+
+      duplicate_catalogue_records_eliminated:
+        movies.length -
+        uniqueMovies.length -
+        moviesWithoutAggregateId,
     },
 
     requests: {
-      attempted:
-        movieResults.length,
+      old_expected_requests:
+        movies.length,
+
+      actual_requests:
+        uniqueMovies.length,
 
       successful:
-        successfulRequests.length,
+        fetchResults.filter(
+          r => r.ok
+        ).length,
 
       failed:
-        failedRequests.length,
+        failures.length,
 
-      failures:
-        failedRequests.map(
-          result => ({
-            movie:
-              result.title,
+      failures,
 
-            aggregate_movie_id:
-              result
-                .aggregate_movie_id,
+      average_duration_ms:
+        requestDurations.length
+          ? Math.round(
+              requestDurations.reduce(
+                (a, b) => a + b,
+                0
+              ) /
+              requestDurations.length
+            )
+          : null,
 
-            error:
-              result.error,
-
-            stage:
-              result.stage ||
-              null,
-
-            http_status:
-              result.http_status ||
-              null
-          })
-        )
+      slowest_requests:
+        slowestRequests,
     },
 
     colombo: {
-      movies:
-        target.movieCount,
+      raw_sessions:
+        rawSessions.length,
 
-      sessions:
-        target.sessions.length,
+      unique_sessions:
+        uniqueSessions.length,
+
+      duplicate_sessions_eliminated:
+        rawSessions.length -
+        uniqueSessions.length,
 
       schedule:
-        target.sessions
+        uniqueSessions,
     },
 
-    timing: {
-      catalogue_ms:
-        catalogueStageMs,
-
-      sessions_stage_ms:
-        sessionStageMs,
-
-      total_pipeline_ms:
-        Date.now() -
-        totalStartedAt,
-
-      average_session_request_ms:
-        averageRequestMs,
-
-      slowest_session_requests:
-        slowestRequests
-    }
-  };
-}
-
-
-// ============================================================
-// REQUEST HANDLER
-// ============================================================
-
-export async function onRequestGet(
-  context
-) {
-  const db =
-    context.env.DB;
-
-
-  let result;
-
-
-  try {
-    result =
-      await safeRun({
-        db,
-
-        provider:
-          "cinemas_nos",
-
-        operation:
-          "colombo_full_schedule_diagnostic",
-
-        sourceFile:
-          "functions/api/nos-test.js",
-
-        request:
-          context.request,
-
-        reproduction: {
-          endpoint:
-            "/api/nos-test",
-
-          method:
-            "GET"
-        },
-
-        context: {
-          diagnostic:
-            true,
-
-          target_theater:
-            TARGET_THEATER.name,
-
-          target_theater_uuid:
-            TARGET_THEATER.uuid,
-
-          batch_size:
-            BATCH_SIZE,
-
-          writes_to_content_tables:
-            false
-        },
-
-        run:
-          runNosColomboDiagnostic,
-
-        validate: data => {
-          if (
-            !data ||
-            !data.catalogue ||
-            !data.requests ||
-            !data.colombo
-          ) {
-            throw new Error(
-              "NOS Colombo diagnostic returned an incomplete result"
-            );
-          }
-
-
-          if (
-            data.catalogue
-              .movie_count <= 0
-          ) {
-            throw new Error(
-              "NOS Colombo diagnostic returned no movies"
-            );
-          }
-
-
-          if (
-            data.requests
-              .successful <= 0
-          ) {
-            throw new Error(
-              "NOS Colombo diagnostic had no successful session requests"
-            );
-          }
-
-
-          return true;
-        },
-
-        getItemCount:
-          data =>
-            data?.colombo
-              ?.sessions ??
-            null,
-
-        getMetadata:
-          data => ({
-            target_theater:
-              TARGET_THEATER.name,
-
-            catalogue_movies:
-              data?.catalogue
-                ?.movie_count ??
-              null,
-
-            request_successes:
-              data?.requests
-                ?.successful ??
-              null,
-
-            request_failures:
-              data?.requests
-                ?.failed ??
-              null,
-
-            theater_movies:
-              data?.colombo
-                ?.movies ??
-              null,
-
-            theater_sessions:
-              data?.colombo
-                ?.sessions ??
-              null,
-
-            pipeline_ms:
-              data?.timing
-                ?.total_pipeline_ms ??
-              null
-          }),
-
-        fallbackData: {
-          target_theater:
-            TARGET_THEATER,
-
-          catalogue: {
-            movie_count: 0
-          },
-
-          requests: {
-            attempted: 0,
-            successful: 0,
-            failed: 0,
-            failures: []
-          },
-
-          colombo: {
-            movies: 0,
-            sessions: 0,
-            schedule: []
-          }
-        }
-      });
-
-
-  } catch (frameworkError) {
-    return respond(
-      {
-        ok: false,
-
-        graceful_failure:
-          false,
-
-        stage:
-          "reliability_framework_failure",
-
-        message:
-          frameworkError
-            ?.message ||
-          String(
-            frameworkError
-          ),
-
-        stack:
-          frameworkError
-            ?.stack ||
-          null
-      },
-      500
-    );
-  }
-
-
-  /*
-   * NOS failure itself remains graceful.
-   */
-
-  if (!result.ok) {
-    return respond({
-      ok: false,
-
-      graceful_failure:
-        true,
-
-      provider:
-        result.provider,
-
-      operation:
-        result.operation,
-
-      duration_ms:
-        result.durationMs,
-
-      error:
-        result.error,
-
-      fallback:
-        result.data,
-
-      message:
-        "The NOS Colombo diagnostic failed, but PTLife remained operational."
-    });
-  }
-
-
-  return respond({
-    ok: true,
-
-    graceful_success:
-      true,
-
-    provider:
-      result.provider,
-
-    operation:
-      result.operation,
-
-    duration_ms:
-      result.durationMs,
-
-    session_count:
-      result.itemCount,
-
-    recovered:
-      result.recovered,
-
-    recovery:
-      result.recovery,
-
-    data:
-      result.data,
+    success:
+      (
+        uniqueMovies.length > 0 &&
+        failures.length === 0 &&
+        uniqueSessions.length > 0
+      ),
 
     next_step:
-      "Use the timing and Colombo schedule results to determine the production NOS import strategy."
+      "Compare duration, unique aggregate movie count, raw sessions, and unique sessions with the previous diagnostic.",
   });
 }
