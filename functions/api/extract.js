@@ -684,40 +684,85 @@ function dedupeAdjacentBlocks(blocks) {
 
 function extractSemanticBlocks(html) {
   const cleaned = removeNonContentHtml(html);
-  const blocks = [];
+  const candidates = [];
 
   /*
-   * Elements that usually contain meaningful standalone content.
-   *
-   * We now include div/span/strong/etc., but only keep them when
-   * they are LEAF-LIKE: they must not contain another meaningful
-   * block element.
+   * Add a candidate while remembering where it appeared
+   * in the original HTML.
    */
-  const elementRegex =
-    /<(h[1-6]|p|li|dt|dd|figcaption|caption|div|span|strong|b|small|time|address)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  function addCandidate(position, tag, text) {
+    text = stripTags(text);
+
+    if (!text) return;
+
+    if (!/[\p{L}\p{N}€$£¥]/u.test(text)) {
+      return;
+    }
+
+    let type = classifyElement(tag);
+
+    if (looksLikeKnownLabel(text)) {
+      type = "label";
+    }
+
+    candidates.push({
+      position,
+      type,
+      tag: tag.toLowerCase(),
+      text
+    });
+  }
+
 
   /*
-   * If one of these occurs inside a candidate element, the
-   * candidate is probably a wrapper rather than a leaf.
+   * ----------------------------------------------------------
+   * PASS 1
+   * Reliable semantic elements.
+   * ----------------------------------------------------------
    */
-  const childContentRegex =
-    /<(h[1-6]|p|li|dt|dd|figcaption|caption|div|section|article|ul|ol|table|tr|td|th)\b/i;
+
+  const semanticRegex =
+    /<(h[1-6]|p|li|dt|dd|figcaption|caption|time|address)\b[^>]*>([\s\S]*?)<\/\1>/gi;
 
   let match;
 
-  while ((match = elementRegex.exec(cleaned)) !== null) {
-    const tag = match[1].toLowerCase();
+  while ((match = semanticRegex.exec(cleaned)) !== null) {
+    addCandidate(
+      match.index,
+      match[1],
+      match[2]
+    );
+  }
+
+
+  /*
+   * ----------------------------------------------------------
+   * PASS 2
+   * Short leaf-like containers.
+   *
+   * These often contain useful values such as:
+   *
+   * Small Auditorium
+   * 100 min.
+   * Ages
+   * Prices
+   * Buy Ticket
+   *
+   * We reject containers containing block-level children.
+   * ----------------------------------------------------------
+   */
+
+  const leafRegex =
+    /<(div|span|strong|b|small)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+
+  const containsStructuralChild =
+    /<(h[1-6]|p|li|dt|dd|div|section|article|ul|ol|table|tr|td|th)\b/i;
+
+  while ((match = leafRegex.exec(cleaned)) !== null) {
     const innerHtml = match[2];
 
-    /*
-     * For container-like elements, reject wrappers containing
-     * meaningful child structures.
-     *
-     * Ordinary semantic elements such as <p> and <h2> are kept.
-     */
     if (
-      ["div", "span", "strong", "b", "small", "address"].includes(tag) &&
-      childContentRegex.test(innerHtml)
+      containsStructuralChild.test(innerHtml)
     ) {
       continue;
     }
@@ -727,65 +772,90 @@ function extractSemanticBlocks(html) {
     if (!text) continue;
 
     /*
-     * Ignore tiny punctuation-only fragments.
+     * Leaf containers are intended for labels and concise values,
+     * not entire paragraphs.
      */
-    if (!/[\p{L}\p{N}€$£¥]/u.test(text)) {
+    if (text.length > 300) {
       continue;
     }
 
-    /*
-     * Extremely long leaf blocks usually indicate unusual markup
-     * rather than a useful label/value.
-     */
-    if (
-      ["div", "span", "strong", "b", "small"].includes(tag) &&
-      text.length > 500
-    ) {
-      continue;
-    }
-
-    let type = classifyElement(tag);
-
-    /*
-     * <time> has particularly useful semantics.
-     */
-    if (tag === "time") {
-      type = "time";
-    }
-
-    /*
-     * <address> is useful location context.
-     */
-    if (tag === "address") {
-      type = "location";
-    }
-
-    /*
-     * A short known phrase can function as a label regardless
-     * of whether the publisher used semantic HTML.
-     */
-    if (looksLikeKnownLabel(text)) {
-      type = "label";
-    }
-
-    blocks.push({
-      type,
-      tag,
+    addCandidate(
+      match.index,
+      match[1],
       text
-    });
+    );
   }
 
-  /*
-   * Sort by actual document position.
-   *
-   * Because our regex scans different nested element types,
-   * document position matters more than element type.
-   *
-   * The temporary position value is removed afterward.
-   */
-  return dedupeAdjacentBlocks(blocks);
-}
 
+  /*
+   * ----------------------------------------------------------
+   * Restore actual document order.
+   * ----------------------------------------------------------
+   */
+
+  candidates.sort(
+    (a, b) => a.position - b.position
+  );
+
+
+  /*
+   * ----------------------------------------------------------
+   * Deduplicate.
+   *
+   * Nested markup can produce:
+   *
+   * <div><strong>100 min.</strong></div>
+   *
+   * resulting in both:
+   *
+   * div    100 min.
+   * strong 100 min.
+   *
+   * Keep only one when they occur very close together.
+   * ----------------------------------------------------------
+   */
+
+  const result = [];
+
+  for (const candidate of candidates) {
+    const previous =
+      result[result.length - 1];
+
+    if (
+      previous &&
+      previous.text === candidate.text &&
+      Math.abs(
+        previous.position -
+        candidate.position
+      ) < 200
+    ) {
+      /*
+       * Prefer the more semantically useful type.
+       */
+      if (
+        candidate.type === "label" &&
+        previous.type !== "label"
+      ) {
+        result[result.length - 1] =
+          candidate;
+      }
+
+      continue;
+    }
+
+    result.push(candidate);
+  }
+
+
+  /*
+   * Position is useful internally but unnecessary in the
+   * normal block representation.
+   */
+
+  return result.map(
+    ({ position, ...block }) => block
+  );
+}
 /*
  * ============================================================
  * LINKS
