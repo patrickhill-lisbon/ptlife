@@ -1,47 +1,23 @@
 /*
- * PTLife — Cinemas NOS End-to-End Test v1
+ * PTLife — Cinemas NOS End-to-End Test v2
  *
  * Diagnostic only.
- *
- * Purpose:
- *   Prove that PTLife can automatically:
- *
- *   1. Fetch the current NOS movie catalogue.
- *   2. Find a movie with an aggregateMovieId.
- *   3. Fetch that movie's sessions.
- *   4. Parse days -> theaters -> sessions.
- *   5. Identify Lisbon-area and Algarve screenings.
- *
- * This does NOT:
- *   - write to D1
- *   - modify the generic extractor
- *   - modify production event data
- *
- * Endpoint after deployment:
- *
- *   /api/nos-test
- *
- * Optional:
- *
- *   /api/nos-test?q=odisseia
- *
- * The q parameter lets us try to select a movie
- * whose title contains the supplied text.
+ * No D1 writes.
  */
 
-const NOS_ORIGIN =
-  "https://www.cinemas.nos.pt";
+const NOS_ORIGIN = "https://www.cinemas.nos.pt";
 
 const MOVIES_URL =
   NOS_ORIGIN +
   "/graphql/execute.json/cinemas/getMoviesInTheaters";
 
-const SESSIONS_URL =
+const SESSIONS_BASE =
   NOS_ORIGIN +
-  "/bin/cinemas/render/getMovieSessions.getMovieSessionsAggregator.json";
+  "/bin/cinemas/render/" +
+  "getMovieSessions.getMovieSessionsAggregator.json";
 
 
-function jsonResponse(data, status = 200) {
+function respond(data, status = 200) {
   return new Response(
     JSON.stringify(data, null, 2),
     {
@@ -49,7 +25,6 @@ function jsonResponse(data, status = 200) {
       headers: {
         "content-type":
           "application/json; charset=utf-8",
-
         "cache-control":
           "no-store",
       },
@@ -58,1157 +33,483 @@ function jsonResponse(data, status = 200) {
 }
 
 
-async function fetchJson(url) {
+async function getJson(url) {
   const response = await fetch(url, {
     headers: {
-      "accept":
-        "application/json,text/plain,*/*",
-
-      "user-agent":
-        "PTLife-NOS-Diagnostic/1.0",
+      accept: "application/json",
     },
   });
 
-  const text =
-    await response.text();
+  const text = await response.text();
 
-  let data;
+  let data = null;
 
   try {
     data = JSON.parse(text);
   } catch {
-    data = null;
+    // handled by caller
   }
 
   return {
     ok: response.ok,
     status: response.status,
-    url,
-    text,
     data,
+    preview: text.slice(0, 1000),
   };
 }
 
 
-/*
- * Recursively search an arbitrary JSON object
- * for arrays.
- *
- * We use this because we don't want this
- * diagnostic test to fail merely because NOS
- * changes one wrapper-property name.
- */
-function collectArrays(
-  value,
-  path = "$",
-  output = []
-) {
-  if (Array.isArray(value)) {
-    output.push({
-      path,
-      value,
-    });
+function findMovies(data) {
+  /*
+   * We know NOS returns:
+   *
+   * data
+   *   -> movieList
+   *      -> items
+   *
+   * But keep a few harmless fallbacks while
+   * we confirm the exact property name.
+   */
 
-    for (
-      let i = 0;
-      i < value.length;
-      i++
-    ) {
-      collectArrays(
-        value[i],
-        `${path}[${i}]`,
-        output
-      );
-    }
+  const candidates = [
+    data?.data?.movieList?.items,
+    data?.data?.moviesList?.items,
+    data?.data?.movies?.items,
+    data?.movieList?.items,
+    data?.movies?.items,
+  ];
 
-    return output;
-  }
-
-  if (
-    value &&
-    typeof value === "object"
-  ) {
-    for (
-      const [key, child]
-      of Object.entries(value)
-    ) {
-      collectArrays(
-        child,
-        `${path}.${key}`,
-        output
-      );
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
     }
   }
 
-  return output;
+  return null;
 }
 
 
-/*
- * Find the most likely movie array.
- *
- * A movie record should contain some
- * combination of:
- *
- *   uuid
- *   title
- *   originalTitle
- *   aggregateMovieId
- */
-function findMovieArray(data) {
-  const arrays =
-    collectArrays(data);
-
-  let best = null;
-  let bestScore = -1;
-
-  for (const candidate of arrays) {
-    if (!candidate.value.length) {
-      continue;
-    }
-
-    const objects =
-      candidate.value.filter(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          !Array.isArray(item)
-      );
-
-    if (!objects.length) {
-      continue;
-    }
-
-    let score = 0;
-
-    for (
-      const item of objects.slice(0, 10)
-    ) {
-      const keys =
-        Object.keys(item);
-
-      if (
-        keys.some(
-          (key) =>
-            key.toLowerCase() ===
-            "aggregatemovieid"
-        )
-      ) {
-        score += 10;
-      }
-
-      if ("uuid" in item) {
-        score += 2;
-      }
-
-      if (
-        "title" in item ||
-        "name" in item
-      ) {
-        score += 2;
-      }
-
-      if (
-        "originalTitle" in item ||
-        "originaltitle" in item
-      ) {
-        score += 1;
-      }
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-
-      best = {
-        path:
-          candidate.path,
-
-        value:
-          candidate.value,
-      };
-    }
+function valueByName(obj, wanted) {
+  if (!obj || typeof obj !== "object") {
+    return null;
   }
 
-  return best;
-}
+  const target = wanted.toLowerCase();
 
-
-function getCaseInsensitive(
-  object,
-  wantedKey
-) {
-  if (
-    !object ||
-    typeof object !== "object"
-  ) {
-    return undefined;
-  }
-
-  const wanted =
-    wantedKey.toLowerCase();
-
-  for (
-    const [key, value]
-    of Object.entries(object)
-  ) {
-    if (
-      key.toLowerCase() === wanted
-    ) {
+  for (const [key, value] of Object.entries(obj)) {
+    if (key.toLowerCase() === target) {
       return value;
     }
   }
 
-  return undefined;
+  return null;
 }
 
 
-function movieTitle(movie) {
+function getAggregateId(movie) {
   return (
-    getCaseInsensitive(
-      movie,
-      "title"
-    ) ||
-
-    getCaseInsensitive(
-      movie,
-      "name"
-    ) ||
-
-    getCaseInsensitive(
-      movie,
-      "originalTitle"
-    ) ||
-
+    valueByName(movie, "aggregateMovieId") ||
+    valueByName(movie, "aggregateMovieID") ||
     null
   );
 }
 
 
-function movieOriginalTitle(movie) {
+function getTitle(movie) {
   return (
-    getCaseInsensitive(
-      movie,
-      "originalTitle"
-    ) ||
-
-    getCaseInsensitive(
-      movie,
-      "originaltitle"
-    ) ||
-
+    valueByName(movie, "title") ||
+    valueByName(movie, "name") ||
+    valueByName(movie, "originalTitle") ||
     null
   );
 }
 
 
-function aggregateMovieId(movie) {
-  return (
-    getCaseInsensitive(
-      movie,
-      "aggregateMovieId"
-    ) ||
-
-    getCaseInsensitive(
-      movie,
-      "aggregatemovieid"
-    ) ||
-
-    null
-  );
-}
-
-
-function movieUuid(movie) {
-  return (
-    getCaseInsensitive(
-      movie,
-      "uuid"
-    ) ||
-    null
-  );
-}
-
-
-/*
- * Choose a movie.
- *
- * If ?q= is supplied, prefer a title match.
- *
- * Otherwise choose the first movie for which
- * NOS gives us an aggregateMovieId.
- */
-function chooseMovie(
-  movies,
-  query
-) {
-  const usable =
-    movies.filter(
-      (movie) =>
-        aggregateMovieId(movie)
-    );
-
-  if (!usable.length) {
-    return null;
-  }
-
-  if (query) {
-    const q =
-      query
-        .trim()
-        .toLowerCase();
-
-    const match =
-      usable.find(
-        (movie) => {
-          const text = [
-            movieTitle(movie),
-            movieOriginalTitle(movie),
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-
-          return text.includes(q);
-        }
-      );
-
-    if (match) {
-      return match;
-    }
-  }
-
-  return usable[0];
-}
-
-
-/*
- * NOS session response helpers.
- */
-
-function getDays(data) {
-  if (
-    Array.isArray(data?.days)
-  ) {
-    return data.days;
-  }
-
+export async function onRequestGet(context) {
   /*
-   * Fallback:
-   *
-   * Find an array whose objects contain
-   * a theaters array.
-   */
-  const arrays =
-    collectArrays(data);
-
-  for (const candidate of arrays) {
-    const first =
-      candidate.value.find(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          !Array.isArray(item)
-      );
-
-    if (
-      first &&
-      Array.isArray(first.theaters)
-    ) {
-      return candidate.value;
-    }
-  }
-
-  return [];
-}
-
-
-function getTheaters(day) {
-  return Array.isArray(
-    day?.theaters
-  )
-    ? day.theaters
-    : [];
-}
-
-
-function getSessions(theater) {
-  return Array.isArray(
-    theater?.sessions
-  )
-    ? theater.sessions
-    : [];
-}
-
-
-function normalizeText(value) {
-  return String(
-    value ?? ""
-  )
-    .normalize("NFD")
-    .replace(
-      /[\u0300-\u036f]/g,
-      ""
-    )
-    .toLowerCase();
-}
-
-
-/*
- * Diagnostic geographic grouping.
- *
- * These are NOT intended as the final PTLife
- * geographic definitions.
- */
-
-function isLisbonArea(theater) {
-  const text =
-    normalizeText(
-      [
-        theater?.name,
-        theater?.location,
-      ]
-        .filter(Boolean)
-        .join(" ")
-    );
-
-  const clues = [
-    "lisboa",
-    "lisbon",
-    "colombo",
-    "amoreiras",
-    "vasco da gama",
-    "cascai",
-    "alcabideche",
-    "oeiras",
-    "odivelas",
-    "almada",
-    "montijo",
-  ];
-
-  return clues.some(
-    (clue) =>
-      text.includes(clue)
-  );
-}
-
-
-function isAlgarve(theater) {
-  const text =
-    normalizeText(
-      [
-        theater?.name,
-        theater?.location,
-      ]
-        .filter(Boolean)
-        .join(" ")
-    );
-
-  const clues = [
-    "algarve",
-    "faro",
-    "almancil",
-    "portimao",
-  ];
-
-  return clues.some(
-    (clue) =>
-      text.includes(clue)
-  );
-}
-
-
-function compactSession(
-  day,
-  theater,
-  session
-) {
-  return {
-    day:
-      day?.name ??
-      null,
-
-    theater:
-      theater?.name ??
-      null,
-
-    theater_id:
-      theater?.theaterId ??
-      theater?.theaterID ??
-      null,
-
-    region_id:
-      theater?.regionId ??
-      theater?.regionID ??
-      null,
-
-    location:
-      theater?.location ??
-      null,
-
-    session_uuid:
-      session?.uuid ??
-      null,
-
-    time:
-      session?.time ??
-      null,
-
-    operational_date:
-      session?.operationalDate ??
-      null,
-
-    type:
-      session?.type ??
-      null,
-
-    description:
-      session?.description ??
-      null,
-
-    format:
-      session?.format ??
-      null,
-
-    version:
-      session?.version ??
-      null,
-
-    room:
-      session?.room ??
-      session?.auditorium ??
-      null,
-
-    ticket_url:
-      session?.uuid
-        ? (
-          "https://bilheteira.cinemas.nos.pt/" +
-          "Cinemas/Ticket?SessionUUID=" +
-          encodeURIComponent(
-            session.uuid
-          )
-        )
-        : null,
-  };
-}
-
-
-export async function onRequestGet(
-  context
-) {
-  const requestUrl =
-    new URL(
-      context.request.url
-    );
-
-  const q =
-    requestUrl.searchParams.get(
-      "q"
-    );
-
-
-  /*
-   * STEP 1
-   *
-   * Fetch NOS movie catalogue.
+   * -----------------------------------------
+   * STEP 1 — GET MOVIE CATALOGUE
+   * -----------------------------------------
    */
 
-  let moviesResult;
+  let catalogue;
 
   try {
-    moviesResult =
-      await fetchJson(
-        MOVIES_URL
-      );
+    catalogue = await getJson(MOVIES_URL);
   } catch (error) {
-    return jsonResponse(
-      {
-        ok: false,
-
-        stage:
-          "fetch_movies",
-
-        error:
-          String(
-            error?.message ||
-            error
-          ),
-      },
-      502
-    );
+    return respond({
+      ok: false,
+      stage: "catalogue_fetch_exception",
+      error: String(error),
+    }, 500);
   }
 
 
-  if (!moviesResult.ok) {
-    return jsonResponse(
-      {
-        ok: false,
-
-        stage:
-          "fetch_movies",
-
-        nos_http_status:
-          moviesResult.status,
-
-        source_url:
-          moviesResult.url,
-
-        response_preview:
-          moviesResult.text.slice(
-            0,
-            2000
-          ),
-      },
-      moviesResult.status
-    );
+  if (!catalogue.ok) {
+    return respond({
+      ok: false,
+      stage: "catalogue_http",
+      status: catalogue.status,
+      preview: catalogue.preview,
+    }, 500);
   }
 
 
-  if (!moviesResult.data) {
-    return jsonResponse(
-      {
-        ok: false,
-
-        stage:
-          "parse_movies",
-
-        reason:
-          "NOS movie response was not valid JSON.",
-
-        response_preview:
-          moviesResult.text.slice(
-            0,
-            2000
-          ),
-      },
-      502
-    );
+  if (!catalogue.data) {
+    return respond({
+      ok: false,
+      stage: "catalogue_json",
+      preview: catalogue.preview,
+    }, 500);
   }
 
 
   /*
-   * STEP 2
-   *
-   * Locate the movie array.
+   * -----------------------------------------
+   * STEP 2 — LOCATE MOVIES
+   * -----------------------------------------
    */
 
-  const movieArrayInfo =
-    findMovieArray(
-      moviesResult.data
-    );
+  const movies = findMovies(catalogue.data);
 
 
-  if (
-    !movieArrayInfo ||
-    !Array.isArray(
-      movieArrayInfo.value
-    )
-  ) {
-    return jsonResponse(
-      {
-        ok: false,
+  if (!movies) {
+    return respond({
+      ok: false,
 
-        stage:
-          "locate_movie_array",
+      stage: "movie_array_not_found",
 
-        reason:
-          "Could not identify the movie array in the NOS response.",
+      data_fields:
+        Object.keys(catalogue.data || {}),
 
-        top_level_fields:
-          Object.keys(
-            moviesResult.data ||
-            {}
-          ),
-      },
-      502
-    );
+      inner_data_fields:
+        Object.keys(
+          catalogue.data?.data || {}
+        ),
+
+      preview:
+        JSON.stringify(
+          catalogue.data
+        ).slice(0, 3000),
+    }, 500);
   }
 
 
-  const movies =
-    movieArrayInfo.value;
-
-
   /*
-   * STEP 3
-   *
-   * Choose a movie automatically.
+   * -----------------------------------------
+   * STEP 3 — FIND FIRST USABLE MOVIE
+   * -----------------------------------------
    */
 
-  const selectedMovie =
-    chooseMovie(
-      movies,
-      q
-    );
+  let selected = null;
+  let aggregateId = null;
 
 
-  if (!selectedMovie) {
-    return jsonResponse(
-      {
-        ok: false,
+  for (const movie of movies) {
+    const id = getAggregateId(movie);
 
-        stage:
-          "choose_movie",
-
-        movie_array_path:
-          movieArrayInfo.path,
-
-        movie_count:
-          movies.length,
-
-        reason:
-          "No movie with an aggregateMovieId was found.",
-
-        sample_movie_fields:
-          movies
-            .slice(0, 5)
-            .map(
-              (movie) =>
-                Object.keys(
-                  movie || {}
-                )
-            ),
-      },
-      502
-    );
+    if (id) {
+      selected = movie;
+      aggregateId = id;
+      break;
+    }
   }
 
 
-  const selectedAggregateId =
-    aggregateMovieId(
-      selectedMovie
-    );
+  if (!selected) {
+    return respond({
+      ok: false,
+
+      stage: "aggregate_id_not_found",
+
+      movie_count: movies.length,
+
+      first_movie_fields:
+        Object.keys(
+          movies[0] || {}
+        ),
+
+      first_movie:
+        movies[0] || null,
+    }, 500);
+  }
 
 
   /*
-   * STEP 4
-   *
-   * Fetch sessions automatically using
-   * the aggregateMovieId discovered above.
+   * -----------------------------------------
+   * STEP 4 — FETCH SESSIONS
+   * -----------------------------------------
    */
 
   const sessionsUrl =
-    SESSIONS_URL +
+    SESSIONS_BASE +
     "?aggregateMovieId=" +
-    encodeURIComponent(
-      selectedAggregateId
-    );
+    encodeURIComponent(aggregateId);
 
 
-  let sessionsResult;
+  let sessionResult;
+
 
   try {
-    sessionsResult =
-      await fetchJson(
-        sessionsUrl
-      );
+    sessionResult =
+      await getJson(sessionsUrl);
   } catch (error) {
-    return jsonResponse(
-      {
-        ok: false,
+    return respond({
+      ok: false,
 
-        stage:
-          "fetch_sessions",
+      stage: "sessions_fetch_exception",
 
-        selected_movie: {
-          title:
-            movieTitle(
-              selectedMovie
-            ),
+      movie: getTitle(selected),
 
-          aggregate_movie_id:
-            selectedAggregateId,
-        },
+      aggregate_movie_id:
+        aggregateId,
 
-        error:
-          String(
-            error?.message ||
-            error
-          ),
-      },
-      502
-    );
+      error: String(error),
+    }, 500);
   }
 
 
-  if (!sessionsResult.ok) {
-    return jsonResponse(
-      {
-        ok: false,
+  if (!sessionResult.ok) {
+    return respond({
+      ok: false,
 
-        stage:
-          "fetch_sessions",
+      stage: "sessions_http",
 
-        selected_movie: {
-          title:
-            movieTitle(
-              selectedMovie
-            ),
+      movie: getTitle(selected),
 
-          aggregate_movie_id:
-            selectedAggregateId,
-        },
+      aggregate_movie_id:
+        aggregateId,
 
-        nos_http_status:
-          sessionsResult.status,
+      status:
+        sessionResult.status,
 
-        source_url:
-          sessionsUrl,
-
-        response_preview:
-          sessionsResult.text.slice(
-            0,
-            2000
-          ),
-      },
-      sessionsResult.status
-    );
+      preview:
+        sessionResult.preview,
+    }, 500);
   }
 
 
-  if (!sessionsResult.data) {
-    return jsonResponse(
-      {
-        ok: false,
+  if (!sessionResult.data) {
+    return respond({
+      ok: false,
 
-        stage:
-          "parse_sessions",
+      stage: "sessions_json",
 
-        reason:
-          "NOS sessions response was not valid JSON.",
+      movie: getTitle(selected),
 
-        selected_movie: {
-          title:
-            movieTitle(
-              selectedMovie
-            ),
+      aggregate_movie_id:
+        aggregateId,
 
-          aggregate_movie_id:
-            selectedAggregateId,
-        },
-
-        response_preview:
-          sessionsResult.text.slice(
-            0,
-            2000
-          ),
-      },
-      502
-    );
+      preview:
+        sessionResult.preview,
+    }, 500);
   }
 
 
   /*
-   * STEP 5
-   *
-   * Parse:
-   *
-   * days -> theaters -> sessions
+   * -----------------------------------------
+   * STEP 5 — READ KNOWN NOS SESSION STRUCTURE
+   * -----------------------------------------
    */
 
   const days =
-    getDays(
-      sessionsResult.data
-    );
+    Array.isArray(sessionResult.data?.days)
+      ? sessionResult.data.days
+      : [];
 
 
-  const allSessions = [];
+  let theaterAppearances = 0;
+  let sessionCount = 0;
 
-  const uniqueTheaters =
-    new Map();
+  const theaters = new Map();
 
-
-  for (const day of days) {
-    for (
-      const theater
-      of getTheaters(day)
-    ) {
-      const theaterKey =
-        theater?.theaterId ??
-        theater?.theaterID ??
-        theater?.name ??
-        JSON.stringify(
-          theater
-        );
-
-      if (
-        !uniqueTheaters.has(
-          theaterKey
-        )
-      ) {
-        uniqueTheaters.set(
-          theaterKey,
-          {
-            name:
-              theater?.name ??
-              null,
-
-            theater_id:
-              theater?.theaterId ??
-              theater?.theaterID ??
-              null,
-
-            region_id:
-              theater?.regionId ??
-              theater?.regionID ??
-              null,
-
-            location:
-              theater?.location ??
-              null,
-          }
-        );
-      }
-
-
-      for (
-        const session
-        of getSessions(theater)
-      ) {
-        allSessions.push(
-          compactSession(
-            day,
-            theater,
-            session
-          )
-        );
-      }
-    }
-  }
-
-
-  /*
-   * STEP 6
-   *
-   * Geographic diagnostic subsets.
-   */
-
-  const lisbonSessions =
-    [];
-
-  const algarveSessions =
-    [];
+  const samples = [];
 
 
   for (const day of days) {
-    for (
-      const theater
-      of getTheaters(day)
-    ) {
+
+    const dayTheaters =
+      Array.isArray(day?.theaters)
+        ? day.theaters
+        : [];
+
+
+    theaterAppearances +=
+      dayTheaters.length;
+
+
+    for (const theater of dayTheaters) {
+
+      const theaterId =
+        theater?.theaterId ||
+        theater?.theaterID ||
+        theater?.name;
+
+
+      if (!theaters.has(theaterId)) {
+        theaters.set(theaterId, {
+          name:
+            theater?.name || null,
+
+          theater_id:
+            theater?.theaterId ||
+            theater?.theaterID ||
+            null,
+
+          region_id:
+            theater?.regionId ||
+            theater?.regionID ||
+            null,
+
+          location:
+            theater?.location ||
+            null,
+        });
+      }
+
+
       const sessions =
-        getSessions(theater);
+        Array.isArray(theater?.sessions)
+          ? theater.sessions
+          : [];
 
-      if (
-        isLisbonArea(theater)
-      ) {
-        for (
-          const session
-          of sessions
-        ) {
-          lisbonSessions.push(
-            compactSession(
-              day,
-              theater,
-              session
-            )
-          );
-        }
-      }
 
-      if (
-        isAlgarve(theater)
-      ) {
-        for (
-          const session
-          of sessions
-        ) {
-          algarveSessions.push(
-            compactSession(
-              day,
-              theater,
-              session
-            )
-          );
+      sessionCount += sessions.length;
+
+
+      for (const session of sessions) {
+
+        if (samples.length >= 20) {
+          continue;
         }
+
+        samples.push({
+          day:
+            day?.name || null,
+
+          theater:
+            theater?.name || null,
+
+          theater_id:
+            theater?.theaterId ||
+            theater?.theaterID ||
+            null,
+
+          session_uuid:
+            session?.uuid || null,
+
+          time:
+            session?.time || null,
+
+          operational_date:
+            session?.operationalDate ||
+            null,
+
+          type:
+            session?.type || null,
+
+          description:
+            session?.description ||
+            null,
+
+          format:
+            session?.format || null,
+
+          version:
+            session?.version || null,
+        });
       }
     }
   }
 
 
   /*
-   * STEP 7
-   *
-   * Return a compact but useful diagnostic.
+   * -----------------------------------------
+   * SUCCESS
+   * -----------------------------------------
    */
 
-  return jsonResponse({
+  return respond({
     ok: true,
 
     fetched_at:
       new Date().toISOString(),
 
-    test: {
-      purpose:
-        "Prove the complete NOS catalogue -> aggregateMovieId -> sessions pipeline without manually supplying a movie ID.",
+    test:
+      "NOS automatic catalogue-to-sessions pipeline",
 
-      query:
-        q ?? null,
+    writes_to_d1:
+      false,
 
-      writes_to_d1:
-        false,
-
-      modifies_generic_extractor:
-        false,
-    },
-
-
-    movie_catalogue: {
-      source_url:
-        MOVIES_URL,
-
-      http_status:
-        moviesResult.status,
-
-      detected_movie_array_path:
-        movieArrayInfo.path,
+    catalogue: {
+      status:
+        catalogue.status,
 
       movie_count:
         movies.length,
-
-      movies_with_aggregate_id:
-        movies.filter(
-          (movie) =>
-            aggregateMovieId(
-              movie
-            )
-        ).length,
     },
 
-
     selected_movie: {
-      uuid:
-        movieUuid(
-          selectedMovie
-        ),
-
       title:
-        movieTitle(
-          selectedMovie
-        ),
+        getTitle(selected),
 
-      original_title:
-        movieOriginalTitle(
-          selectedMovie
+      uuid:
+        valueByName(
+          selected,
+          "uuid"
         ),
 
       aggregate_movie_id:
-        selectedAggregateId,
+        aggregateId,
 
-      top_level_fields:
-        Object.keys(
-          selectedMovie ||
-          {}
-        ),
+      fields:
+        Object.keys(selected),
     },
 
+    sessions_request: {
+      status:
+        sessionResult.status,
 
-    sessions_source: {
       url:
         sessionsUrl,
-
-      http_status:
-        sessionsResult.status,
     },
 
-
-    parsed_sessions: {
-      days_count:
+    result: {
+      days:
         days.length,
 
-      theater_count:
-        uniqueTheaters.size,
+      unique_theaters:
+        theaters.size,
 
-      session_count:
-        allSessions.length,
+      theater_appearances:
+        theaterAppearances,
 
-      lisbon_session_count:
-        lisbonSessions.length,
-
-      algarve_session_count:
-        algarveSessions.length,
+      sessions:
+        sessionCount,
     },
-
 
     theaters:
       Array.from(
-        uniqueTheaters.values()
+        theaters.values()
       ),
-
-
-    /*
-     * Enough samples to verify that the
-     * normalization is working without
-     * returning an enormous response.
-     */
 
     session_sample:
-      allSessions.slice(
-        0,
-        25
-      ),
+      samples,
 
-
-    lisbon_session_sample:
-      lisbonSessions.slice(
-        0,
-        25
-      ),
-
-
-    algarve_session_sample:
-      algarveSessions.slice(
-        0,
-        25
-      ),
-
-
-    /*
-     * Helpful for understanding future
-     * schema changes without dumping the
-     * entire response.
-     */
-
-    raw_sessions_top_level_fields:
+    raw_session_fields:
       Object.keys(
-        sessionsResult.data ||
-        {}
+        sessionResult.data || {}
       ),
 
-
-    success_criteria: {
-      catalogue_loaded:
-        movies.length > 0,
-
-      aggregate_id_discovered_automatically:
-        Boolean(
-          selectedAggregateId
-        ),
-
-      sessions_response_loaded:
-        Boolean(
-          sessionsResult.data
-        ),
-
-      days_parsed:
-        days.length > 0,
-
-      sessions_parsed:
-        allSessions.length > 0,
-    },
-
+    success:
+      (
+        movies.length > 0 &&
+        Boolean(aggregateId) &&
+        days.length > 0 &&
+        sessionCount > 0
+      ),
 
     next_step:
-      allSessions.length > 0
-        ? "NOS end-to-end pipeline is proven. Back-test Colombo and Algarve, then design the production NOS provider adapter."
-        : "Catalogue-to-session request worked, but no sessions were parsed. Inspect the returned sessions schema before production work.",
+      "If success is true, back-test Colombo and Algarve before building the NOS production adapter.",
   });
 }
