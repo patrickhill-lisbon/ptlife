@@ -12,8 +12,7 @@ const NOS_ORIGIN = "https://www.cinemas.nos.pt";
 
 const THEATERS_URL =
   NOS_ORIGIN +
-  "/graphql/execute.json/cinemas/getTheaters";
-
+  "/graphql/execute.json/cinemas/getAllTheatersWithoutRegion";
 
 function respond(data, status = 200) {
   return new Response(
