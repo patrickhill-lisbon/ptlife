@@ -1,8 +1,24 @@
 /*
  * Worth A Go — Generic Extractor
- * Version 2
+ * Version 3
  *
  * READ ONLY — does not write to D1.
+ *
+ * PIPELINE
+ * --------
+ * URL
+ *   ↓
+ * optional site anomaly normalization
+ *   ↓
+ * JSON-LD structured extraction
+ *   ↓
+ * semantic block extraction
+ *   ↓
+ * visible text token extraction
+ *   ↓
+ * [future] recognition grammar
+ *   ↓
+ * [future] reconciliation
  *
  * PRINCIPLES
  * ----------
@@ -10,7 +26,7 @@
  * 2. Site-specific filters only normalize genuine anomalies.
  * 3. Prefer authoritative structured data when available.
  * 4. Visible content supplements structured data.
- * 5. Preserve semantic context before applying regex parsers.
+ * 5. Preserve document order and nearby context.
  * 6. Never invent missing information.
  * 7. If the source does not mention something, omit it.
  */
@@ -32,20 +48,6 @@ function hostnameFor(url) {
   }
 }
 
-
-/*
- * Most websites should NOT appear here.
- *
- * Later, genuine anomalies can be handled with something like:
- *
- * const SITE_PROFILES = {
- *   "example.com": {
- *     preExtract: normalizeExample
- *   }
- * };
- *
- * For now this remains deliberately empty.
- */
 
 const SITE_PROFILES = {};
 
@@ -136,17 +138,6 @@ function stripTags(text) {
 }
 
 
-/*
- * Remove elements that generally contain no useful event data.
- *
- * IMPORTANT:
- * We are deliberately conservative here.
- *
- * We do NOT yet remove <header>, <nav>, <footer>, etc.
- * because some badly structured sites may place useful content
- * inside them.
- */
-
 function removeNonContentHtml(html) {
   return html
     .replace(
@@ -195,8 +186,7 @@ function extractJsonLd(html) {
       blocks.push(JSON.parse(raw));
     } catch {
       /*
-       * Malformed JSON-LD must not cause the page
-       * extraction to fail.
+       * Malformed JSON-LD should not cause extraction failure.
        */
     }
   }
@@ -254,9 +244,7 @@ function findSchemaEvents(
     found.push(value);
 
     /*
-     * Nested subEvents are not automatically separate
-     * programs. Reconciliation will eventually decide
-     * whether they represent occurrences.
+     * Do not automatically promote nested subEvents to programs.
      */
     return found;
   }
@@ -289,13 +277,7 @@ function schemaName(value) {
 
   if (typeof value === "string") {
     /*
-     * Some Schema.org implementations incorrectly put
-     * a type name in performer rather than an actual name.
-     *
-     * Example:
-     * "performer": "Organization"
-     *
-     * That is not useful program information.
+     * Schema type placeholders are not performer names.
      */
     if (
       value === "Organization" ||
@@ -324,9 +306,10 @@ function schemaNames(value) {
   const values =
     Array.isArray(value) ? value : [value];
 
-  const result = values
-    .map(schemaName)
-    .filter(Boolean);
+  const result =
+    values
+      .map(schemaName)
+      .filter(Boolean);
 
   return result.length
     ? result
@@ -494,27 +477,133 @@ function extractTitleTag(html) {
 
 /*
  * ============================================================
- * SEMANTIC BLOCK EXTRACTION
+ * GENERIC LABELS
  * ============================================================
- *
- * Instead of flattening the entire page into one giant string,
- * preserve meaningful blocks.
- *
- * Later parsers will use nearby blocks as context.
- *
- * Example:
- *
- *   heading: Dates / Schedules
- *   text:    Saturday, 26 September 2026
- *   text:    7:00pm
- *
- * is much more useful than simply finding "7:00pm"
- * somewhere in the webpage.
  */
 
+const GENERIC_LABELS = new Set([
+  "date",
+  "dates",
+  "date / time",
+  "date / times",
+  "dates / schedules",
+  "schedule",
+  "schedules",
+  "when",
+
+  "data",
+  "datas",
+  "data / horário",
+  "datas / horários",
+  "horário",
+  "horários",
+
+  "time",
+  "times",
+
+  "duration",
+  "duração",
+
+  "price",
+  "prices",
+  "pricing",
+  "adult price",
+  "child price",
+  "baby price",
+  "infant price",
+  "preço",
+  "preços",
+
+  "ticket",
+  "tickets",
+  "bilhete",
+  "bilhetes",
+
+  "age",
+  "ages",
+  "idade",
+  "idades",
+
+  "language",
+  "languages",
+  "languages available",
+  "idioma",
+  "idiomas",
+
+  "accessibility",
+  "acessibilidade",
+
+  "capacity",
+  "max capacity",
+  "max. capacity",
+  "maximum capacity",
+  "lotação",
+  "participants",
+  "participantes",
+
+  "location",
+  "venue",
+  "place",
+  "local",
+
+  "meeting point",
+  "ponto de encontro",
+
+  "departure",
+  "departures",
+  "departure point",
+  "partida",
+  "partidas",
+  "ponto de partida",
+
+  "booking",
+  "reservation",
+  "reservations",
+  "reserva",
+  "reservas",
+
+  "registration",
+  "inscrição",
+  "inscrições",
+
+  "opening hours",
+  "opening times",
+  "horário de funcionamento",
+
+  "information",
+  "informações",
+  "details",
+  "detalhes"
+]);
+
+
+function normalizeLabel(text) {
+  return text
+    .toLowerCase()
+    .replace(/[:：]\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function looksLikeKnownLabel(text) {
+  if (!text) return false;
+
+  return GENERIC_LABELS.has(
+    normalizeLabel(text)
+  );
+}
+
+
+/*
+ * ============================================================
+ * SEMANTIC BLOCKS
+ * ============================================================
+ */
 
 function classifyElement(tag) {
-  const lower = tag.toLowerCase();
+  const lower =
+    tag.toLowerCase();
 
   if (/^h[1-6]$/.test(lower)) {
     return "heading";
@@ -543,182 +632,51 @@ function classifyElement(tag) {
   return "text";
 }
 
-/*
- * Some labels frequently occur as short standalone blocks even
- * when the publisher didn't use semantic HTML such as <dt>.
- *
- * This is NOT event extraction yet.
- *
- * We're simply identifying text that is likely functioning as
- * a label so later parsers can use it as context.
- */
-
-const GENERIC_LABELS = new Set([
-  "date",
-  "dates",
-  "date / time",
-  "date / times",
-  "dates / schedules",
-  "schedule",
-  "schedules",
-  "when",
-
-  "data",
-  "datas",
-  "data / horário",
-  "datas / horários",
-  "horário",
-  "horários",
-
-  "time",
-  "times",
-  "duration",
-  "duração",
-
-  "price",
-  "prices",
-  "pricing",
-  "preço",
-  "preços",
-
-  "ticket",
-  "tickets",
-  "bilhete",
-  "bilhetes",
-
-  "age",
-  "ages",
-  "idade",
-  "idades",
-
-  "language",
-  "languages",
-  "idioma",
-  "idiomas",
-
-  "accessibility",
-  "acessibilidade",
-
-  "capacity",
-  "lotação",
-  "participants",
-  "participantes",
-
-  "location",
-  "venue",
-  "place",
-  "local",
-  "meeting point",
-  "ponto de encontro",
-  "departure",
-  "departure point",
-  "partida",
-  "ponto de partida",
-
-  "booking",
-  "reservation",
-  "reservations",
-  "reserva",
-  "reservas",
-
-  "registration",
-  "inscrição",
-  "inscrições",
-
-  "opening hours",
-  "opening times",
-  "horário de funcionamento",
-
-  "information",
-  "informações",
-  "details",
-  "detalhes"
-]);
-
-
-function looksLikeKnownLabel(text) {
-  if (!text) return false;
-
-  const normalized =
-    text
-      .toLowerCase()
-      .replace(/[:：]\s*$/, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  return GENERIC_LABELS.has(normalized);
-}
-
-
-/*
- * Prevent exact adjacent duplicates.
- *
- * Websites frequently contain the same content in both desktop
- * and mobile navigation/layout structures.
- *
- * We remain conservative: only immediately repeated identical
- * blocks are removed here.
- */
-
-function dedupeAdjacentBlocks(blocks) {
-  const result = [];
-
-  for (const block of blocks) {
-    const previous =
-      result[result.length - 1];
-
-    if (
-      previous &&
-      previous.type === block.type &&
-      previous.text === block.text
-    ) {
-      continue;
-    }
-
-    result.push(block);
-  }
-
-  return result;
-}
-
 
 function extractSemanticBlocks(html) {
-  const cleaned = removeNonContentHtml(html);
+  const cleaned =
+    removeNonContentHtml(html);
+
   const candidates = [];
 
-  /*
-   * Add a candidate while remembering where it appeared
-   * in the original HTML.
-   */
-  function addCandidate(position, tag, text) {
+
+  function addCandidate(
+    position,
+    tag,
+    text
+  ) {
     text = stripTags(text);
 
     if (!text) return;
 
-    if (!/[\p{L}\p{N}€$£¥]/u.test(text)) {
+    if (
+      !/[\p{L}\p{N}€$£¥]/u.test(text)
+    ) {
       return;
     }
 
-    let type = classifyElement(tag);
+    let type =
+      classifyElement(tag);
 
-    if (looksLikeKnownLabel(text)) {
+    if (
+      looksLikeKnownLabel(text)
+    ) {
       type = "label";
     }
 
     candidates.push({
       position,
       type,
-      tag: tag.toLowerCase(),
+      tag:
+        tag.toLowerCase(),
       text
     });
   }
 
 
   /*
-   * ----------------------------------------------------------
-   * PASS 1
-   * Reliable semantic elements.
-   * ----------------------------------------------------------
+   * PASS 1:
+   * structurally reliable elements.
    */
 
   const semanticRegex =
@@ -726,7 +684,10 @@ function extractSemanticBlocks(html) {
 
   let match;
 
-  while ((match = semanticRegex.exec(cleaned)) !== null) {
+  while (
+    (match =
+      semanticRegex.exec(cleaned)) !== null
+  ) {
     addCandidate(
       match.index,
       match[1],
@@ -736,20 +697,8 @@ function extractSemanticBlocks(html) {
 
 
   /*
-   * ----------------------------------------------------------
-   * PASS 2
-   * Short leaf-like containers.
-   *
-   * These often contain useful values such as:
-   *
-   * Small Auditorium
-   * 100 min.
-   * Ages
-   * Prices
-   * Buy Ticket
-   *
-   * We reject containers containing block-level children.
-   * ----------------------------------------------------------
+   * PASS 2:
+   * concise leaf containers.
    */
 
   const leafRegex =
@@ -758,23 +707,26 @@ function extractSemanticBlocks(html) {
   const containsStructuralChild =
     /<(h[1-6]|p|li|dt|dd|div|section|article|ul|ol|table|tr|td|th)\b/i;
 
-  while ((match = leafRegex.exec(cleaned)) !== null) {
-    const innerHtml = match[2];
+  while (
+    (match =
+      leafRegex.exec(cleaned)) !== null
+  ) {
+    const innerHtml =
+      match[2];
 
     if (
-      containsStructuralChild.test(innerHtml)
+      containsStructuralChild.test(
+        innerHtml
+      )
     ) {
       continue;
     }
 
-    const text = stripTags(innerHtml);
+    const text =
+      stripTags(innerHtml);
 
     if (!text) continue;
 
-    /*
-     * Leaf containers are intended for labels and concise values,
-     * not entire paragraphs.
-     */
     if (text.length > 300) {
       continue;
     }
@@ -787,57 +739,40 @@ function extractSemanticBlocks(html) {
   }
 
 
-  /*
-   * ----------------------------------------------------------
-   * Restore actual document order.
-   * ----------------------------------------------------------
-   */
-
   candidates.sort(
-    (a, b) => a.position - b.position
+    (a, b) =>
+      a.position - b.position
   );
 
 
-  /*
-   * ----------------------------------------------------------
-   * Deduplicate.
-   *
-   * Nested markup can produce:
-   *
-   * <div><strong>100 min.</strong></div>
-   *
-   * resulting in both:
-   *
-   * div    100 min.
-   * strong 100 min.
-   *
-   * Keep only one when they occur very close together.
-   * ----------------------------------------------------------
-   */
-
   const result = [];
 
-  for (const candidate of candidates) {
+  for (
+    const candidate of candidates
+  ) {
     const previous =
-      result[result.length - 1];
+      result[
+        result.length - 1
+      ];
 
     if (
       previous &&
-      previous.text === candidate.text &&
+      previous.text ===
+        candidate.text &&
       Math.abs(
         previous.position -
         candidate.position
       ) < 200
     ) {
-      /*
-       * Prefer the more semantically useful type.
-       */
       if (
-        candidate.type === "label" &&
-        previous.type !== "label"
+        candidate.type ===
+          "label" &&
+        previous.type !==
+          "label"
       ) {
-        result[result.length - 1] =
-          candidate;
+        result[
+          result.length - 1
+        ] = candidate;
       }
 
       continue;
@@ -847,31 +782,202 @@ function extractSemanticBlocks(html) {
   }
 
 
-  /*
-   * Position is useful internally but unnecessary in the
-   * normal block representation.
-   */
-
   return result.map(
-    ({ position, ...block }) => block
+    ({ position, ...block }) =>
+      block
   );
 }
+
+
+/*
+ * ============================================================
+ * VISIBLE TEXT TOKENS — NEW IN VERSION 3
+ * ============================================================
+ *
+ * Semantic blocks are valuable because they preserve labels,
+ * headings, paragraphs, etc.
+ *
+ * But some sites place important values in unusual elements.
+ *
+ * Example:
+ *
+ *     Duration
+ *     3h00
+ *
+ * We therefore also create a low-level ordered text stream.
+ *
+ * The goal is NOT to understand the values here.
+ * Recognition comes later.
+ */
+
+
+/*
+ * Tags that normally create a visible separation between pieces
+ * of text.
+ *
+ * We replace these with a special marker before stripping HTML.
+ */
+
+function buildVisibleTextStream(html) {
+  let cleaned =
+    removeNonContentHtml(html);
+
+  /*
+   * Remove document metadata and form machinery that cannot
+   * normally represent the visible activity description.
+   */
+
+  cleaned = cleaned
+    .replace(
+      /<head\b[^>]*>[\s\S]*?<\/head>/gi,
+      " "
+    )
+    .replace(
+      /<template\b[^>]*>[\s\S]*?<\/template>/gi,
+      " "
+    );
+
+
+  /*
+   * Insert boundaries around common structural and inline
+   * elements.
+   *
+   * The boundary is intentionally unusual so ordinary webpage
+   * content is unlikely to contain it.
+   */
+
+  const BOUNDARY =
+    "\n__WAG_BOUNDARY__\n";
+
+  cleaned = cleaned
+    .replace(
+      /<br\s*\/?>/gi,
+      BOUNDARY
+    )
+    .replace(
+      /<\/?(?:h[1-6]|p|li|dt|dd|div|section|article|aside|header|footer|nav|main|figure|figcaption|table|thead|tbody|tfoot|tr|td|th|ul|ol|address|time|button|label|option)\b[^>]*>/gi,
+      BOUNDARY
+    );
+
+
+  /*
+   * Remaining tags are treated as inline formatting and removed.
+   */
+
+  cleaned =
+    cleaned.replace(
+      /<[^>]+>/g,
+      " "
+    );
+
+
+  cleaned =
+    decodeHtml(cleaned);
+
+
+  return cleaned;
+}
+
+
+/*
+ * Break the visible stream into concise ordered tokens.
+ */
+
+function extractVisibleTextTokens(
+  html
+) {
+  const stream =
+    buildVisibleTextStream(html);
+
+  const rawPieces =
+    stream.split(
+      /__WAG_BOUNDARY__|\r?\n/
+    );
+
+  const tokens = [];
+
+
+  for (
+    const rawPiece of rawPieces
+  ) {
+    const text =
+      normalizeWhitespace(
+        rawPiece
+      );
+
+    if (!text) continue;
+
+    /*
+     * Ignore punctuation-only fragments.
+     */
+
+    if (
+      !/[\p{L}\p{N}€$£¥]/u.test(
+        text
+      )
+    ) {
+      continue;
+    }
+
+
+    /*
+     * Huge text fragments are unlikely to be useful label/value
+     * tokens. They remain available through page text and semantic
+     * paragraphs, so skipping them here loses no essential source
+     * material.
+     */
+
+    if (text.length > 500) {
+      continue;
+    }
+
+
+    /*
+     * Avoid immediate duplicates caused by nested layout.
+     */
+
+    const previous =
+      tokens[
+        tokens.length - 1
+      ];
+
+    if (
+      previous &&
+      previous.text === text
+    ) {
+      continue;
+    }
+
+
+    tokens.push({
+      index:
+        tokens.length,
+
+      text,
+
+      ...(looksLikeKnownLabel(text)
+        ? {
+            kind: "label"
+          }
+        : {})
+    });
+  }
+
+
+  return tokens;
+}
+
+
 /*
  * ============================================================
  * LINKS
  * ============================================================
- *
- * Links will eventually be important for:
- *
- * Buy tickets
- * Book now
- * Register
- * Check availability
- *
- * For now we merely preserve them.
  */
 
-function extractLinks(html, baseUrl) {
+function extractLinks(
+  html,
+  baseUrl
+) {
   const links = [];
 
   const regex =
@@ -879,18 +985,33 @@ function extractLinks(html, baseUrl) {
 
   let match;
 
-  while ((match = regex.exec(html)) !== null) {
+  while (
+    (match = regex.exec(html)) !== null
+  ) {
     const href =
-      decodeHtml(match[1]).trim();
+      decodeHtml(
+        match[1]
+      ).trim();
 
     const text =
-      stripTags(match[2]);
+      stripTags(
+        match[2]
+      );
 
-    if (!href || !text) continue;
+    if (
+      !href ||
+      !text
+    ) {
+      continue;
+    }
 
     if (
       href.startsWith("#") ||
-      href.toLowerCase().startsWith("javascript:")
+      href
+        .toLowerCase()
+        .startsWith(
+          "javascript:"
+        )
     ) {
       continue;
     }
@@ -921,11 +1042,6 @@ function extractLinks(html, baseUrl) {
  * ============================================================
  * FLAT PAGE TEXT
  * ============================================================
- *
- * Keep this diagnostic for now.
- *
- * Later, most extraction should operate on semantic blocks
- * rather than this flattened representation.
  */
 
 function buildPageText(html) {
@@ -947,43 +1063,40 @@ function buildPageText(html) {
         " "
       )
   )
-    .replace(/\u00a0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
+    .replace(
+      /\u00a0/g,
+      " "
+    )
+    .replace(
+      /[ \t]+/g,
+      " "
+    )
+    .replace(
+      /\n[ \t]+/g,
+      "\n"
+    )
+    .replace(
+      /\n{3,}/g,
+      "\n\n"
+    )
     .trim();
 }
 
 
 /*
  * ============================================================
- * DIAGNOSTIC BLOCK SELECTION
+ * DIAGNOSTIC SELECTION
  * ============================================================
- *
- * At this stage we want to inspect the representation without
- * returning thousands of navigation blocks.
- *
- * We return:
- *
- * - blocks near the H1
- * - blocks containing known labels
- * - blocks near those labels
- *
- * This is diagnostic only. The complete block array remains
- * available internally to future parsers.
  */
 
 function selectDiagnosticBlocks(
   blocks,
   h1,
-  maxBlocks = 120
+  maxBlocks = 140
 ) {
   const interestingIndexes =
     new Set();
 
-  /*
-   * Find H1/title area.
-   */
 
   if (h1) {
     const normalizedH1 =
@@ -1000,18 +1113,22 @@ function selectDiagnosticBlocks(
           .toLowerCase() ===
         normalizedH1
       ) {
-        /*
-         * Include a generous window after the program title.
-         */
         for (
-          let j = Math.max(0, i - 3);
-          j <= Math.min(
+          let j =
+            Math.max(
+              0,
+              i - 4
+            );
+          j <=
+          Math.min(
             blocks.length - 1,
-            i + 40
+            i + 70
           );
           j++
         ) {
-          interestingIndexes.add(j);
+          interestingIndexes.add(
+            j
+          );
         }
 
         break;
@@ -1019,9 +1136,6 @@ function selectDiagnosticBlocks(
     }
   }
 
-  /*
-   * Include context around known labels anywhere on the page.
-   */
 
   for (
     let i = 0;
@@ -1029,45 +1143,61 @@ function selectDiagnosticBlocks(
     i++
   ) {
     if (
-      blocks[i].type === "label" ||
+      blocks[i].type ===
+        "label" ||
       looksLikeKnownLabel(
         blocks[i].text
       )
     ) {
       for (
-        let j = Math.max(0, i - 2);
-        j <= Math.min(
+        let j =
+          Math.max(
+            0,
+            i - 2
+          );
+        j <=
+        Math.min(
           blocks.length - 1,
           i + 8
         );
         j++
       ) {
-        interestingIndexes.add(j);
+        interestingIndexes.add(
+          j
+        );
       }
     }
   }
 
+
   const selected =
     [...interestingIndexes]
-      .sort((a, b) => a - b)
-      .map(index => ({
-        index,
-        ...blocks[index]
-      }));
+      .sort(
+        (a, b) =>
+          a - b
+      )
+      .map(
+        index => ({
+          index,
+          ...blocks[index]
+        })
+      );
 
-  /*
-   * If semantic selection found nothing useful, return the first
-   * blocks so we can diagnose the unfamiliar page.
-   */
 
   if (!selected.length) {
     return blocks
-      .slice(0, maxBlocks)
-      .map((block, index) => ({
-        index,
-        ...block
-      }));
+      .slice(
+        0,
+        maxBlocks
+      )
+      .map(
+        (block, index) => ({
+          index,
+          ...block
+        })
+      );
   }
+
 
   return selected.slice(
     0,
@@ -1077,36 +1207,128 @@ function selectDiagnosticBlocks(
 
 
 /*
+ * Select visible tokens near labels.
+ *
+ * This is ONLY for debugging Version 3.
+ *
+ * The future parser will use the complete token array.
+ */
+
+function selectDiagnosticTokens(
+  tokens,
+  maxTokens = 180
+) {
+  const interesting =
+    new Set();
+
+
+  for (
+    let i = 0;
+    i < tokens.length;
+    i++
+  ) {
+    if (
+      tokens[i].kind ===
+      "label"
+    ) {
+      /*
+       * Show some context before the label and substantially more
+       * after it so we can inspect label/value relationships.
+       */
+
+      for (
+        let j =
+          Math.max(
+            0,
+            i - 2
+          );
+        j <=
+        Math.min(
+          tokens.length - 1,
+          i + 10
+        );
+        j++
+      ) {
+        interesting.add(j);
+      }
+    }
+  }
+
+
+  /*
+   * If no known labels exist, return the first part of the stream.
+   */
+
+  if (!interesting.size) {
+    return tokens.slice(
+      0,
+      maxTokens
+    );
+  }
+
+
+  return [...interesting]
+    .sort(
+      (a, b) =>
+        a - b
+    )
+    .slice(
+      0,
+      maxTokens
+    )
+    .map(
+      index =>
+        tokens[index]
+    );
+}
+
+
+/*
  * ============================================================
  * API
  * ============================================================
  */
 
-export async function onRequestGet(context) {
+export async function onRequestGet(
+  context
+) {
   const requestUrl =
-    new URL(context.request.url);
+    new URL(
+      context.request.url
+    );
 
   const sourceUrl =
-    requestUrl.searchParams.get("url");
+    requestUrl.searchParams.get(
+      "url"
+    );
+
 
   if (!sourceUrl) {
     return Response.json(
       {
         ok: false,
-        error: "Missing url parameter"
+        error:
+          "Missing url parameter"
       },
-      { status: 400 }
+      {
+        status: 400
+      }
     );
   }
 
+
   let parsedUrl;
+
 
   try {
     parsedUrl =
       new URL(sourceUrl);
 
     if (
-      !["http:", "https:"].includes(
+      ![
+        "http:",
+        "https:"
+      ].includes(
         parsedUrl.protocol
       )
     ) {
@@ -1118,17 +1340,22 @@ export async function onRequestGet(context) {
     return Response.json(
       {
         ok: false,
-        error: "Invalid URL"
+        error:
+          "Invalid URL"
       },
-      { status: 400 }
+      {
+        status: 400
+      }
     );
   }
+
 
   try {
     const profile =
       getSiteProfile(
         parsedUrl.toString()
       );
+
 
     const response =
       await fetch(
@@ -1141,28 +1368,31 @@ export async function onRequestGet(context) {
         }
       );
 
+
     if (!response.ok) {
       return Response.json({
         ok: false,
+
         http_status:
           response.status,
+
         source_url:
           parsedUrl.toString()
       });
     }
 
+
     const html =
       await response.text();
 
+
     /*
      * Optional anomaly normalization.
-     *
-     * No profiles currently exist, so ordinary pages pass through
-     * unchanged.
      */
 
     let normalizedHtml =
       html;
+
 
     if (
       profile?.preExtract &&
@@ -1170,14 +1400,16 @@ export async function onRequestGet(context) {
         "function"
     ) {
       normalizedHtml =
-        profile.preExtract(html);
+        profile.preExtract(
+          html
+        );
     }
 
 
     /*
-     * ------------------------------
+     * --------------------------------------------------------
      * Structured data
-     * ------------------------------
+     * --------------------------------------------------------
      */
 
     const jsonLd =
@@ -1185,14 +1417,19 @@ export async function onRequestGet(context) {
         normalizedHtml
       );
 
+
     const schemaEvents = [];
 
-    for (const block of jsonLd) {
+
+    for (
+      const block of jsonLd
+    ) {
       findSchemaEvents(
         block,
         schemaEvents
       );
     }
+
 
     const structuredEvents =
       schemaEvents.map(
@@ -1201,9 +1438,9 @@ export async function onRequestGet(context) {
 
 
     /*
-     * ------------------------------
-     * Visible semantic content
-     * ------------------------------
+     * --------------------------------------------------------
+     * Visible content
+     * --------------------------------------------------------
      */
 
     const h1 =
@@ -1211,15 +1448,24 @@ export async function onRequestGet(context) {
         normalizedHtml
       );
 
+
     const titleTag =
       extractTitleTag(
         normalizedHtml
       );
 
+
     const semanticBlocks =
       extractSemanticBlocks(
         normalizedHtml
       );
+
+
+    const visibleTokens =
+      extractVisibleTextTokens(
+        normalizedHtml
+      );
+
 
     const diagnosticBlocks =
       selectDiagnosticBlocks(
@@ -1227,11 +1473,19 @@ export async function onRequestGet(context) {
         h1
       );
 
+
+    const diagnosticTokens =
+      selectDiagnosticTokens(
+        visibleTokens
+      );
+
+
     const links =
       extractLinks(
         normalizedHtml,
         parsedUrl.toString()
       );
+
 
     const pageText =
       buildPageText(
@@ -1240,9 +1494,9 @@ export async function onRequestGet(context) {
 
 
     /*
-     * ------------------------------
+     * --------------------------------------------------------
      * Response
-     * ------------------------------
+     * --------------------------------------------------------
      */
 
     return Response.json({
@@ -1252,7 +1506,8 @@ export async function onRequestGet(context) {
         response.status,
 
       fetched_at:
-        new Date().toISOString(),
+        new Date()
+          .toISOString(),
 
       source_url:
         parsedUrl.toString(),
@@ -1277,12 +1532,18 @@ export async function onRequestGet(context) {
       semantic_blocks_found:
         semanticBlocks.length,
 
+      visible_tokens_found:
+        visibleTokens.length,
+
       links_found:
         links.length,
 
+
       page: {
         ...(h1
-          ? { h1 }
+          ? {
+              h1
+            }
           : {}),
 
         ...(titleTag
@@ -1295,23 +1556,32 @@ export async function onRequestGet(context) {
         text_length:
           pageText.length,
 
-        /*
-         * Smaller than Version 1 because semantic_blocks are now
-         * the more useful diagnostic.
-         */
         text_preview:
           pageText.slice(
             0,
-            1500
+            1200
           )
       },
+
+
+      /*
+       * Diagnostic subsets only.
+       *
+       * Internally we have all semantic blocks and all visible
+       * tokens. We don't need to send enormous arrays to the
+       * browser while developing.
+       */
 
       semantic_blocks:
         diagnosticBlocks,
 
+      visible_text_tokens:
+        diagnosticTokens,
+
       structured_events:
         structuredEvents
     });
+
 
   } catch (error) {
     return Response.json(
@@ -1319,13 +1589,16 @@ export async function onRequestGet(context) {
         ok: false,
 
         source_url:
-          parsedUrl?.toString() ??
+          parsedUrl
+            ?.toString() ??
           sourceUrl,
 
         error:
           error.message
       },
-      { status: 500 }
+      {
+        status: 500
+      }
     );
   }
 }
