@@ -1,25 +1,26 @@
 /*
- * PTLife Reliability Framework — Test Endpoint v2
+ * PTLife Reliability Framework — Test Endpoint v3
  *
- * Diagnostic only.
+ * Tests the reusable safeRun() wrapper.
  *
  * Modes:
  *
  *   /api/reliability-test
- *       Deliberately fails.
+ *   /api/reliability-test?mode=failure
+ *       Simulates provider failure.
  *
  *   /api/reliability-test?mode=success
- *       Simulates successful provider recovery.
+ *       Simulates provider success/recovery.
+ *
+ *   /api/reliability-test?mode=invalid
+ *       Simulates HTTP success with bad provider data.
  *
  * No PTLife event/program/place data is modified.
  */
 
 import {
-  logError,
-  markProviderAttempt,
-  markProviderFailure,
-  markProviderSuccess
-} from "../lib/reliability.js";
+  safeRun
+} from "../lib/safe-run.js";
 
 
 function jsonResponse(data, status = 200) {
@@ -52,294 +53,272 @@ export async function onRequestGet(context) {
       "failure"
     ).toLowerCase();
 
-  const provider =
-    "reliability_test";
 
-  const startedAt =
-    Date.now();
+  /*
+   * Keep the test provider separate from any
+   * real PTLife provider.
+   */
+
+  const provider =
+    "safe_run_test";
 
 
   /*
-   * ==================================================
+   * --------------------------------------------------
    * OUTER SAFETY NET
-   * ==================================================
    *
-   * If the reliability framework itself fails,
-   * return useful diagnostic JSON instead of allowing
-   * an unexplained Cloudflare failure.
+   * safeRun() handles provider failures.
+   *
+   * This outer try/catch handles a failure in the
+   * reliability framework itself.
+   * --------------------------------------------------
    */
 
   try {
 
-    /*
-     * =================================================
-     * SUCCESS / RECOVERY TEST
-     * =================================================
-     */
+    // ==================================================
+    // SUCCESS
+    // ==================================================
 
     if (mode === "success") {
 
-      const operation =
-        "deliberate_test_success";
-
-
-      await markProviderAttempt(
-        db,
-        provider,
-        operation
-      );
-
-
-      const durationMs =
-        Date.now() - startedAt;
-
-
-      const recovery =
-        await markProviderSuccess(
+      const result =
+        await safeRun({
           db,
+
           provider,
-          {
-            operation,
 
-            durationMs,
+          operation:
+            "test_success",
 
-            httpStatus: 200,
+          sourceFile:
+            "functions/api/reliability-test.js",
 
-            itemCount: 42,
+          request:
+            context.request,
 
-            metadata: {
-              diagnostic:
-                true,
+          run: async () => {
+            return {
+              items: [
+                { id: 1 },
+                { id: 2 },
+                { id: 3 }
+              ],
 
-              simulated_items:
-                42,
+              source:
+                "simulated"
+            };
+          },
 
-              note:
-                "Deliberate successful run used to test PTLife provider recovery."
+          validate: data => {
+            if (
+              !Array.isArray(
+                data?.items
+              )
+            ) {
+              throw new Error(
+                "Test provider did not return an items array"
+              );
             }
-          }
-        );
+
+            return true;
+          },
+
+          getMetadata: data => ({
+            diagnostic:
+              true,
+
+            mode:
+              "success",
+
+            source:
+              data.source
+          })
+        });
 
 
       return jsonResponse({
-        ok: true,
-
-        graceful_success:
-          true,
-
         diagnostic_test:
           true,
 
-        message:
-          recovery.recovered
-            ? "The provider recovered successfully and its open errors were resolved."
-            : "The provider completed successfully.",
+        requested_mode:
+          mode,
 
-        provider: {
-          name:
-            provider,
-
-          operation,
-
-          status:
-            "healthy"
-        },
-
-        recovery: {
-          recovered:
-            recovery.recovered,
-
-          previous_failures:
-            recovery.previousFailures,
-
-          previous_error_id:
-            recovery.previousErrorId,
-
-          resolved_error_count:
-            recovery.resolvedErrorCount
-        },
-
-        simulated_result: {
-          item_count: 42,
-          http_status: 200
-        },
-
-        duration_ms:
-          durationMs,
-
-        next_step:
-          "Inspect provider_health and system_errors in D1."
+        result
       });
     }
 
 
-    /*
-     * =================================================
-     * FAILURE TEST
-     * =================================================
-     */
+    // ==================================================
+    // INVALID DATA
+    // ==================================================
+    //
+    // This simulates an especially important failure:
+    //
+    // upstream HTTP request succeeds, but its schema
+    // has changed or its content is unusable.
+    //
+    // safeRun() should treat this as a provider failure.
+    // ==================================================
 
-    const operation =
-      "deliberate_test_failure";
+    if (mode === "invalid") {
 
-
-    await markProviderAttempt(
-      db,
-      provider,
-      operation
-    );
-
-
-    try {
-
-      /*
-       * Deliberately fail.
-       */
-
-      throw new Error(
-        "PTLife deliberate reliability test error"
-      );
-
-
-    } catch (error) {
-
-      const durationMs =
-        Date.now() - startedAt;
-
-
-      const logged =
-        await logError(
+      const result =
+        await safeRun({
           db,
-          error,
-          {
-            provider,
 
-            operation,
+          provider,
 
-            stage:
-              "deliberate_test",
+          operation:
+            "test_invalid_data",
 
-            severity:
-              "error",
+          stage:
+            "validation",
+
+          sourceFile:
+            "functions/api/reliability-test.js",
+
+          request:
+            context.request,
+
+          reproduction: {
+            endpoint:
+              "/api/reliability-test?mode=invalid",
+
+            method:
+              "GET"
+          },
+
+          context: {
+            diagnostic:
+              true,
+
+            test_type:
+              "invalid_provider_schema"
+          },
+
+          run: async () => {
 
             /*
-             * Logical source location.
-             *
-             * This is the filename we recognize
-             * in GitHub, rather than Cloudflare's
-             * generated bundle filename.
+             * Pretend this came from an upstream
+             * service with HTTP 200.
              */
 
-            sourceFile:
-              "functions/api/reliability-test.js",
+            return {
+              unexpected_field:
+                "The upstream schema changed"
+            };
+          },
 
-            requestMethod:
-              context.request.method,
-
-            requestUrl:
-              context.request.url,
-
-            reproduction: {
-              endpoint:
-                "/api/reliability-test",
-
-              method:
-                "GET",
-
-              instructions:
-                "Open /api/reliability-test in a browser."
-            },
-
-            context: {
-              diagnostic:
-                true,
-
-              expected_error:
-                true,
-
-              note:
-                "This error was deliberately generated to test PTLife reliability handling."
+          validate: data => {
+            if (
+              !Array.isArray(
+                data?.items
+              )
+            ) {
+              throw new Error(
+                "Provider schema changed: expected items array"
+              );
             }
+
+            return true;
+          },
+
+          fallbackData: {
+            items: []
           }
-        );
-
-
-      await markProviderFailure(
-        db,
-        provider,
-        logged.errorId,
-        {
-          operation,
-          durationMs
-        }
-      );
+        });
 
 
       return jsonResponse({
-        ok: false,
-
-        graceful_failure:
-          true,
-
         diagnostic_test:
           true,
 
-        message:
-          "The deliberate error was caught. PTLife remained operational.",
+        requested_mode:
+          mode,
 
-        error: {
-          id:
-            logged.errorId,
-
-          repeated:
-            logged.repeated,
-
-          occurrence_count:
-            logged.occurrenceCount
-        },
-
-        provider: {
-          name:
-            provider,
-
-          operation,
-
-          expected_status:
-            "failing"
-        },
-
-        duration_ms:
-          durationMs,
-
-        next_step:
-          "Run ?mode=success to test automatic provider recovery."
+        result
       });
     }
+
+
+    // ==================================================
+    // FAILURE
+    // ==================================================
+
+    const result =
+      await safeRun({
+        db,
+
+        provider,
+
+        operation:
+          "test_failure",
+
+        stage:
+          "provider_fetch",
+
+        sourceFile:
+          "functions/api/reliability-test.js",
+
+        request:
+          context.request,
+
+        reproduction: {
+          endpoint:
+            "/api/reliability-test?mode=failure",
+
+          method:
+            "GET"
+        },
+
+        context: {
+          diagnostic:
+            true,
+
+          test_type:
+            "deliberate_provider_failure"
+        },
+
+        run: async () => {
+          throw new Error(
+            "PTLife deliberate safeRun provider failure"
+          );
+        },
+
+        fallbackData: {
+          items: []
+        }
+      });
+
+
+    return jsonResponse({
+      diagnostic_test:
+        true,
+
+      requested_mode:
+        mode,
+
+      result
+    });
 
 
   } catch (frameworkError) {
 
     /*
-     * =================================================
-     * FRAMEWORK FAILURE
-     * =================================================
-     *
-     * Do not try to log this through the framework,
-     * because the framework itself may be what failed.
+     * If this happens, safeRun itself or the
+     * reliability infrastructure failed.
      */
 
     return jsonResponse(
       {
         ok: false,
 
-        graceful_failure:
-          false,
-
         diagnostic_test:
           true,
 
         stage:
-          "reliability_framework_failure",
+          "safe_run_framework_failure",
 
         message:
           frameworkError?.message ||
@@ -347,10 +326,7 @@ export async function onRequestGet(context) {
 
         stack:
           frameworkError?.stack ||
-          null,
-
-        warning:
-          "The reliability framework itself encountered an error."
+          null
       },
       500
     );
