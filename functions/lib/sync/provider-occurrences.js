@@ -9,6 +9,7 @@
  * This module knows how to:
  *
  *   - load programs belonging to a provider
+ *   - optionally restrict synchronization to selected programs
  *   - load provider place mappings
  *   - fetch provider occurrences with bounded concurrency
  *   - normalize provider occurrences
@@ -87,6 +88,180 @@ async function loadProviderPrograms(
       externalId:
         clean(row.external_id)
     }));
+}
+
+
+// ============================================================
+// PROGRAM SELECTION
+// ============================================================
+
+function selectPrograms(
+  programs,
+  programExternalIds
+) {
+  /*
+   * No selection supplied:
+   * preserve the original behavior and synchronize every
+   * active program belonging to the provider.
+   */
+
+  if (
+    programExternalIds ===
+    undefined
+  ) {
+    return {
+      programs,
+
+      selection: {
+        mode:
+          "all",
+
+        requested:
+          null,
+
+        selected:
+          programs.length
+      }
+    };
+  }
+
+
+  if (
+    !Array.isArray(
+      programExternalIds
+    )
+  ) {
+    throw new Error(
+      "programExternalIds must be an array when supplied"
+    );
+  }
+
+
+  if (
+    programExternalIds.length === 0
+  ) {
+    throw new Error(
+      "programExternalIds cannot be empty when supplied"
+    );
+  }
+
+
+  const requested =
+    [];
+
+  const requestedSet =
+    new Set();
+
+
+  for (
+    const rawExternalId
+    of programExternalIds
+  ) {
+    const externalId =
+      clean(rawExternalId);
+
+
+    if (!externalId) {
+      throw new Error(
+        "programExternalIds contains an invalid external ID"
+      );
+    }
+
+
+    if (
+      requestedSet.has(
+        externalId
+      )
+    ) {
+      throw new Error(
+        "programExternalIds contains duplicate external ID: " +
+        externalId
+      );
+    }
+
+
+    requestedSet.add(
+      externalId
+    );
+
+    requested.push(
+      externalId
+    );
+  }
+
+
+  const byExternalId =
+    new Map();
+
+
+  for (const program of programs) {
+    byExternalId.set(
+      program.externalId,
+      program
+    );
+  }
+
+
+  const selected =
+    [];
+
+  const missing =
+    [];
+
+
+  /*
+   * Preserve the caller's requested order. This makes
+   * diagnostics and future queue jobs deterministic.
+   */
+
+  for (const externalId of requested) {
+    const program =
+      byExternalId.get(
+        externalId
+      );
+
+
+    if (!program) {
+      missing.push(
+        externalId
+      );
+
+      continue;
+    }
+
+
+    selected.push(
+      program
+    );
+  }
+
+
+  if (missing.length) {
+    throw new Error(
+      "Requested provider program(s) not found or inactive: " +
+      missing.join(", ")
+    );
+  }
+
+
+  return {
+    programs:
+      selected,
+
+    selection: {
+      mode:
+        "selected",
+
+      requested:
+        requested.length,
+
+      selected:
+        selected.length,
+
+      external_ids:
+        requested
+    }
+  };
 }
 
 
@@ -185,7 +360,9 @@ export async function syncProviderOccurrences({
 
   minimumPrograms = 1,
 
-  timezone = "UTC"
+  timezone = "UTC",
+
+  programExternalIds
 }) {
   if (!db) {
     throw new Error(
@@ -241,41 +418,40 @@ export async function syncProviderOccurrences({
   }
 
 
+  if (
+    !Number.isInteger(minimumPrograms) ||
+    minimumPrograms < 1
+  ) {
+    throw new Error(
+      "syncProviderOccurrences requires minimumPrograms >= 1"
+    );
+  }
+
+
   const started =
     Date.now();
 
 
   // ---------------------------------------------------------
-  // 1. LOAD PROGRAMS
+  // 1. LOAD ALL ACTIVE PROVIDER PROGRAMS
   // ---------------------------------------------------------
 
-  const programs =
+  const allPrograms =
     await loadProviderPrograms(
       db,
       sourceId
     );
 
 
-  if (
-    programs.length <
-    minimumPrograms
-  ) {
-    throw new Error(
-      "Too few provider programs for occurrence sync: " +
-      programs.length
-    );
-  }
-
-
   /*
    * Provider program identities must themselves be unique.
    */
 
-  const programExternalIds =
+  const programExternalIdsSeen =
     new Set();
 
 
-  for (const program of programs) {
+  for (const program of allPrograms) {
     if (!program.externalId) {
       throw new Error(
         "Provider program has no external ID"
@@ -284,7 +460,7 @@ export async function syncProviderOccurrences({
 
 
     if (
-      programExternalIds.has(
+      programExternalIdsSeen.has(
         program.externalId
       )
     ) {
@@ -295,14 +471,66 @@ export async function syncProviderOccurrences({
     }
 
 
-    programExternalIds.add(
+    programExternalIdsSeen.add(
       program.externalId
     );
   }
 
 
   // ---------------------------------------------------------
-  // 2. LOAD PLACE MAP
+  // 2. SELECT PROGRAMS
+  //
+  // If programExternalIds was not supplied, this returns
+  // every active provider program and preserves our previous
+  // full-provider behavior.
+  // ---------------------------------------------------------
+
+  const selected =
+    selectPrograms(
+      allPrograms,
+      programExternalIds
+    );
+
+
+  const programs =
+    selected.programs;
+
+
+  /*
+   * minimumPrograms protects a FULL provider run against an
+   * unexpectedly tiny provider catalogue.
+   *
+   * For an explicitly selected batch, the caller deliberately
+   * chose its size, so requiring the provider-wide minimum
+   * would make single-program jobs impossible.
+   */
+
+  if (
+    selected.selection.mode ===
+      "all" &&
+    programs.length <
+      minimumPrograms
+  ) {
+    throw new Error(
+      "Too few provider programs for occurrence sync: " +
+      programs.length
+    );
+  }
+
+
+  if (
+    selected.selection.mode ===
+      "selected" &&
+    programs.length === 0
+  ) {
+    throw new Error(
+      "No provider programs selected for occurrence sync"
+    );
+  }
+
+
+  // ---------------------------------------------------------
+  // 3. LOAD PLACE MAP
   // ---------------------------------------------------------
 
   const placeData =
@@ -322,7 +550,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 3. FETCH + NORMALIZE ALL PROGRAMS
+  // 4. FETCH + NORMALIZE SELECTED PROGRAMS
   //
   // There are NO occurrence writes during this phase.
   // ---------------------------------------------------------
@@ -340,11 +568,6 @@ export async function syncProviderOccurrences({
         const itemStarted =
           Date.now();
 
-
-        /*
-         * Give provider-fetch errors enough context to tell
-         * us exactly which provider program failed.
-         */
 
         let fetched;
 
@@ -372,11 +595,6 @@ export async function syncProviderOccurrences({
           );
         }
 
-
-        /*
-         * Keep normalization failures distinct from network
-         * or provider-fetch failures.
-         */
 
         let normalized;
 
@@ -425,7 +643,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 4. VALIDATE + MAP
+  // 5. VALIDATE + MAP
   //
   // Still NO occurrence writes.
   // ---------------------------------------------------------
@@ -626,7 +844,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 5. FAIL BEFORE WRITE IF ANY PLACE IS UNRESOLVED
+  // 6. FAIL BEFORE WRITE IF ANY PLACE IS UNRESOLVED
   // ---------------------------------------------------------
 
   const unresolved =
@@ -654,7 +872,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 6. CROSS-PROGRAM OCCURRENCE IDENTITY CHECK
+  // 7. CROSS-PROGRAM OCCURRENCE IDENTITY CHECK
   // ---------------------------------------------------------
 
   const occurrenceIds =
@@ -689,7 +907,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 7. RECONCILE COUNTS BEFORE WRITE
+  // 8. RECONCILE COUNTS BEFORE WRITE
   // ---------------------------------------------------------
 
   const normalizedTotal =
@@ -715,13 +933,13 @@ export async function syncProviderOccurrences({
     programs.length
   ) {
     throw new Error(
-      "Not every provider program was processed"
+      "Not every selected provider program was processed"
     );
   }
 
 
   // ---------------------------------------------------------
-  // 8. WRITE
+  // 9. WRITE
   //
   // This is deliberately the FIRST occurrence-writing
   // operation in this service.
@@ -745,7 +963,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 9. FINAL RECONCILIATION
+  // 10. FINAL RECONCILIATION
   // ---------------------------------------------------------
 
   if (
@@ -771,7 +989,7 @@ export async function syncProviderOccurrences({
 
 
   // ---------------------------------------------------------
-  // 10. PERFORMANCE
+  // 11. PERFORMANCE
   // ---------------------------------------------------------
 
   const providerDurations =
@@ -789,6 +1007,10 @@ export async function syncProviderOccurrences({
     );
 
 
+  // ---------------------------------------------------------
+  // 12. RESULT
+  // ---------------------------------------------------------
+
   return {
     provider: {
       key:
@@ -798,11 +1020,17 @@ export async function syncProviderOccurrences({
         sourceId
     },
 
+    selection:
+      selected.selection,
+
     programs:
       perProgram,
 
     totals: {
-      programs:
+      provider_programs_available:
+        allPrograms.length,
+
+      programs_processed:
         programs.length,
 
       normalized_occurrences:
@@ -843,6 +1071,9 @@ export async function syncProviderOccurrences({
     safety: {
       fetch_concurrency:
         concurrency,
+
+      selection_mode:
+        selected.selection.mode,
 
       all_provider_fetches_before_write:
         true,
