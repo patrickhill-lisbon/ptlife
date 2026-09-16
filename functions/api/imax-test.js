@@ -1,13 +1,14 @@
 /*
- * PTLife — IMAX / Algolia Test v2
+ * PTLife — IMAX / Algolia Test v3
  *
  * Diagnostic only.
  *
  * Purpose:
- *   Test the IMAX Algolia showtimes index across Portugal.
+ *   Inspect the IMAX Algolia showtimes index broadly,
+ *   without assuming how country filtering works.
  *
  * Default:
- *   Return all Portuguese theatres in the index.
+ *   Request up to 1000 records from the showtimes index.
  *
  * Optional:
  *   ?q=Colombo
@@ -18,6 +19,7 @@
  */
 
 const ALGOLIA_APP_ID = "10MXKGB0UH";
+
 const ALGOLIA_SEARCH_KEY =
   "7c9c8e2eadbdc26fb3b97b5db64a28dd";
 
@@ -61,9 +63,7 @@ async function queryAlgolia(params) {
 
     body: JSON.stringify({
       params:
-        new URLSearchParams(
-          params
-        ).toString(),
+        new URLSearchParams(params).toString(),
     }),
   });
 
@@ -87,6 +87,13 @@ async function queryAlgolia(params) {
   };
 }
 
+/*
+ * Create a compact version of each record.
+ *
+ * We intentionally expose several possible
+ * location/country fields because we're trying
+ * to learn the actual schema.
+ */
 function makeSummary(hit, index) {
   return {
     result_number:
@@ -116,11 +123,19 @@ function makeSummary(hit, index) {
       hit?.state ??
       null,
 
-    country_code:
+    country:
       hit?.country ?? null,
 
     country_name:
       hit?.countryName ?? null,
+
+    address:
+      hit?.address ?? null,
+
+    postal_code:
+      hit?.postalCode ??
+      hit?.zip ??
+      null,
 
     latitude:
       hit?._geoloc?.lat ??
@@ -147,53 +162,161 @@ function makeSummary(hit, index) {
   };
 }
 
+/*
+ * Diagnostic Portugal detector.
+ *
+ * IMPORTANT:
+ * This is NOT intended as our final production
+ * location classifier.
+ *
+ * We're using several signals simply to discover
+ * how the IMAX records identify Portuguese theatres.
+ */
+function looksPortuguese(item) {
+  const country =
+    String(item?.country || "")
+      .trim()
+      .toLowerCase();
+
+  const countryName =
+    String(item?.country_name || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    country === "pt" ||
+    country === "prt" ||
+    country === "portugal"
+  ) {
+    return true;
+  }
+
+  if (
+    countryName === "pt" ||
+    countryName === "prt" ||
+    countryName === "portugal"
+  ) {
+    return true;
+  }
+
+  /*
+   * Known Portuguese city/location clues.
+   *
+   * These are diagnostic fallbacks only.
+   */
+  const text = [
+    item?.name,
+    item?.city,
+    item?.state,
+    item?.address,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const clues = [
+    "lisboa",
+    "lisbon",
+    "porto",
+    "matosinhos",
+    "gaia",
+    "alcabideche",
+    "cascais",
+    "sintra",
+    "amadora",
+    "oeiras",
+    "almada",
+    "faro",
+    "albufeira",
+    "portimão",
+    "portimao",
+    "loulé",
+    "loule",
+    "lagos",
+    "almancil",
+    "tavira",
+    "olhão",
+    "olhao",
+  ];
+
+  return clues.some(
+    (clue) =>
+      text.includes(clue)
+  );
+}
+
+function looksAlgarve(item) {
+  const text = [
+    item?.name,
+    item?.city,
+    item?.state,
+    item?.address,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const clues = [
+    "algarve",
+    "faro",
+    "albufeira",
+    "portimão",
+    "portimao",
+    "loulé",
+    "loule",
+    "lagos",
+    "almancil",
+    "tavira",
+    "olhão",
+    "olhao",
+    "quarteira",
+    "vilamoura",
+  ];
+
+  return clues.some(
+    (clue) =>
+      text.includes(clue)
+  );
+}
+
 export async function onRequestGet(context) {
   const requestUrl =
     new URL(context.request.url);
 
   /*
-   * DEFAULT MODE
-   *
-   * No ?q= parameter:
+   * No q:
    *
    *     /api/imax-test
    *
-   * Search the entire IMAX showtimes
-   * index and restrict results to Portugal.
+   * requests a broad sample from the entire
+   * showtimes index.
    *
+   * q supplied:
    *
-   * OPTIONAL SEARCH MODE
-   *
-   *     /api/imax-test?q=Colombo
    *     /api/imax-test?q=Porto
-   *     /api/imax-test?q=Albufeira
    *
-   * This performs a text search but still
-   * restricts results to Portugal.
+   * performs the old text-search behavior.
    */
 
   const q =
     requestUrl.searchParams.get("q");
 
   const searchQuery =
-    q ? q : "";
+    q || "";
 
   /*
-   * The records we inspected use:
+   * Deliberately NO country filter.
    *
-   *     country: "PT"
-   *
-   * We therefore ask Algolia to return
-   * only Portuguese records.
+   * We want to inspect what Algolia actually
+   * returns before deciding how location
+   * filtering should work.
    */
-
   const params = {
-    query: searchQuery,
+    query:
+      searchQuery,
 
-    hitsPerPage: "100",
-
-    filters:
-      'country:"PT"',
+    hitsPerPage:
+      "1000",
   };
 
   let result;
@@ -219,15 +342,6 @@ export async function onRequestGet(context) {
     );
   }
 
-  /*
-   * If Algolia rejects the filter,
-   * return its actual response.
-   *
-   * We do NOT silently fall back because
-   * this test is intended to tell us
-   * whether country filtering works.
-   */
-
   if (!result.ok) {
     return jsonResponse(
       {
@@ -236,14 +350,11 @@ export async function onRequestGet(context) {
         test: {
           mode:
             q
-              ? "portugal_text_search"
-              : "all_portugal",
+              ? "text_search"
+              : "broad_index_sample",
 
           query:
             searchQuery,
-
-          filter:
-            'country:"PT"',
 
           index:
             ALGOLIA_INDEX,
@@ -257,9 +368,6 @@ export async function onRequestGet(context) {
 
         algolia_response:
           result.data,
-
-        interpretation:
-          "Algolia rejected the request. Do not assume the country field is filterable until we inspect this response.",
       },
       result.status
     );
@@ -282,13 +390,51 @@ export async function onRequestGet(context) {
     );
 
   /*
-   * Make a second compact list that is
-   * particularly useful for our Portugal
-   * coverage test.
+   * Count the actual values found in the
+   * country fields.
+   *
+   * This is particularly useful because our
+   * previous country:"PT" assumption produced
+   * zero results.
    */
+  const countryValues = {};
 
-  const theatreInventory =
-    summary.map(
+  for (const item of summary) {
+    const key =
+      JSON.stringify({
+        country:
+          item.country,
+
+        country_name:
+          item.country_name,
+      });
+
+    countryValues[key] =
+      (countryValues[key] || 0) + 1;
+  }
+
+  /*
+   * Diagnostic Portugal subset.
+   */
+  const portugal =
+    summary.filter(
+      looksPortuguese
+    );
+
+  /*
+   * Algarve subset of the records we consider
+   * potentially Portuguese.
+   */
+  const algarve =
+    portugal.filter(
+      looksAlgarve
+    );
+
+  /*
+   * Keep the Portugal inventory compact.
+   */
+  const portugalInventory =
+    portugal.map(
       (item) => ({
         name:
           item.name,
@@ -302,8 +448,14 @@ export async function onRequestGet(context) {
         state:
           item.state,
 
-        country_code:
-          item.country_code,
+        country:
+          item.country,
+
+        country_name:
+          item.country_name,
+
+        address:
+          item.address,
 
         events_count:
           item.events_count,
@@ -316,55 +468,36 @@ export async function onRequestGet(context) {
       })
     );
 
-  /*
-   * Also identify anything whose location
-   * text suggests Algarve.
-   *
-   * This is NOT used for extraction.
-   * It is merely a convenient diagnostic
-   * in the returned JSON.
-   */
+  const algarveInventory =
+    algarve.map(
+      (item) => ({
+        name:
+          item.name,
 
-  const algarveCandidates =
-    summary.filter(
-      (item) => {
-        const location =
-          [
-            item.name,
-            item.city,
-            item.state,
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
+        slug:
+          item.slug,
 
-        return (
-          location.includes(
-            "algarve"
-          ) ||
-          location.includes(
-            "faro"
-          ) ||
-          location.includes(
-            "albufeira"
-          ) ||
-          location.includes(
-            "portimão"
-          ) ||
-          location.includes(
-            "portimao"
-          ) ||
-          location.includes(
-            "loulé"
-          ) ||
-          location.includes(
-            "loule"
-          ) ||
-          location.includes(
-            "lagos"
-          )
-        );
-      }
+        city:
+          item.city,
+
+        state:
+          item.state,
+
+        country:
+          item.country,
+
+        country_name:
+          item.country_name,
+
+        events_count:
+          item.events_count,
+
+        latitude:
+          item.latitude,
+
+        longitude:
+          item.longitude,
+      })
     );
 
   return jsonResponse({
@@ -375,18 +508,18 @@ export async function onRequestGet(context) {
 
     test: {
       purpose:
-        "Determine the Portuguese theatre coverage of the IMAX Algolia showtimes index.",
+        "Inspect the IMAX Algolia showtimes index without assuming how country filtering is configured.",
 
       mode:
         q
-          ? "portugal_text_search"
-          : "all_portugal",
+          ? "text_search"
+          : "broad_index_sample",
 
       query:
         searchQuery,
 
-      filter:
-        'country:"PT"',
+      algolia_filter:
+        null,
 
       application_id:
         ALGOLIA_APP_ID,
@@ -417,7 +550,7 @@ export async function onRequestGet(context) {
       hits_per_page:
         result.data
           ?.hitsPerPage ??
-        100,
+        null,
 
       processing_time_ms:
         result.data
@@ -426,40 +559,54 @@ export async function onRequestGet(context) {
     },
 
     /*
-     * THIS IS THE MAIN RESULT WE WANT
-     * TO LOOK AT.
+     * VERY IMPORTANT DIAGNOSTIC:
+     *
+     * Show us what country fields actually
+     * contain.
      */
+    observed_country_values:
+      countryValues,
+
+    /*
+     * Portugal records identified from the
+     * returned data.
+     */
+    portugal_theatre_count:
+      portugalInventory.length,
 
     portugal_theatre_inventory:
-      theatreInventory,
-
-    portugal_theatre_count:
-      theatreInventory.length,
+      portugalInventory,
 
     /*
-     * Convenience check for our Algarve
-     * question.
+     * Algarve question.
      */
+    algarve_theatre_count:
+      algarveInventory.length,
 
-    algarve_candidates:
-      algarveCandidates,
+    algarve_theatre_inventory:
+      algarveInventory,
 
     /*
-     * Keep the previous summary format.
+     * Keep the complete compact summary so
+     * we can inspect unexpected records.
      */
-
-    summary,
+    all_results_summary:
+      summary,
 
     /*
-     * Keep raw records for now because
-     * we're still reverse-engineering
-     * the source.
+     * We intentionally do NOT return all raw
+     * events in this version.
+     *
+     * With up to 1000 theatres, raw_hits could
+     * make the diagnostic response enormous.
+     *
+     * We already proved individual theatre
+     * records contain the movie/showtime data.
      */
-
-    raw_hits:
-      rawHits,
+    raw_hits_returned:
+      false,
 
     next_step:
-      "Determine how much of Portugal this IMAX source covers. If Algarve NOS cinemas are absent, test NOS's own underlying data source rather than writing cinema-specific crawlers.",
+      "Use the observed schema to determine Portugal coverage. If Algarve NOS cinemas are absent from IMAX, investigate NOS's own data source as a separate provider.",
   });
 }
