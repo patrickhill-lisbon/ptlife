@@ -1,11 +1,26 @@
 /*
- * PTLife — Cinemas NOS End-to-End Test v2
+ * PTLife — Cinemas NOS End-to-End Test v3
  *
  * Diagnostic only.
- * No D1 writes.
+ *
+ * Purpose:
+ *   Run the real NOS catalogue → sessions pipeline
+ *   through PTLife's safeRun reliability framework.
+ *
+ * IMPORTANT:
+ *   - NO program writes
+ *   - NO occurrence writes
+ *   - NO place writes
+ *   - reliability logging only
  */
 
-const NOS_ORIGIN = "https://www.cinemas.nos.pt";
+import {
+  safeRun
+} from "../lib/safe-run.js";
+
+
+const NOS_ORIGIN =
+  "https://www.cinemas.nos.pt";
 
 const MOVIES_URL =
   NOS_ORIGIN +
@@ -17,6 +32,10 @@ const SESSIONS_BASE =
   "getMovieSessions.getMovieSessionsAggregator.json";
 
 
+// ============================================================
+// RESPONSE
+// ============================================================
+
 function respond(data, status = 200) {
   return new Response(
     JSON.stringify(data, null, 2),
@@ -25,59 +44,156 @@ function respond(data, status = 200) {
       headers: {
         "content-type":
           "application/json; charset=utf-8",
+
         "cache-control":
-          "no-store",
-      },
+          "no-store"
+      }
     }
   );
 }
 
 
-async function getJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json",
-    },
-  });
+// ============================================================
+// PROVIDER ERROR
+// ============================================================
 
-  const text = await response.text();
+function providerError(
+  message,
+  {
+    stage = null,
+    httpStatus = null,
+    details = null
+  } = {}
+) {
+  const error =
+    new Error(message);
 
-  let data = null;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // handled by caller
+  if (stage) {
+    error.providerStage =
+      stage;
   }
 
+  if (httpStatus !== null) {
+    error.httpStatus =
+      httpStatus;
+  }
+
+  if (details !== null) {
+    error.details =
+      details;
+  }
+
+  return error;
+}
+
+
+// ============================================================
+// FETCH JSON
+// ============================================================
+
+async function getJson(url) {
+  let response;
+
+  try {
+    response =
+      await fetch(url, {
+        headers: {
+          accept:
+            "application/json"
+        }
+      });
+  } catch (error) {
+    throw providerError(
+      "NOS network request failed",
+      {
+        stage:
+          "network_fetch",
+
+        details: {
+          url,
+
+          original_error:
+            error?.message ||
+            String(error)
+        }
+      }
+    );
+  }
+
+
+  const text =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw providerError(
+      `NOS returned HTTP ${response.status}`,
+      {
+        stage:
+          "http_response",
+
+        httpStatus:
+          response.status,
+
+        details: {
+          url,
+
+          preview:
+            text.slice(0, 1000)
+        }
+      }
+    );
+  }
+
+
+  let data;
+
+  try {
+    data =
+      JSON.parse(text);
+  } catch {
+    throw providerError(
+      "NOS returned invalid JSON",
+      {
+        stage:
+          "json_parse",
+
+        httpStatus:
+          response.status,
+
+        details: {
+          url,
+
+          preview:
+            text.slice(0, 1000)
+        }
+      }
+    );
+  }
+
+
   return {
-    ok: response.ok,
-    status: response.status,
-    data,
-    preview: text.slice(0, 1000),
+    status:
+      response.status,
+
+    data
   };
 }
 
 
-function findMovies(data) {
-  /*
-   * We know NOS returns:
-   *
-   * data
-   *   -> movieList
-   *      -> items
-   *
-   * But keep a few harmless fallbacks while
-   * we confirm the exact property name.
-   */
+// ============================================================
+// NOS MOVIE HELPERS
+// ============================================================
 
+function findMovies(data) {
   const candidates = [
     data?.data?.movieList?.items,
     data?.data?.moviesList?.items,
     data?.data?.movies?.items,
     data?.movieList?.items,
-    data?.movies?.items,
+    data?.movies?.items
   ];
+
 
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
@@ -85,22 +201,36 @@ function findMovies(data) {
     }
   }
 
+
   return null;
 }
 
 
 function valueByName(obj, wanted) {
-  if (!obj || typeof obj !== "object") {
+  if (
+    !obj ||
+    typeof obj !== "object"
+  ) {
     return null;
   }
 
-  const target = wanted.toLowerCase();
 
-  for (const [key, value] of Object.entries(obj)) {
-    if (key.toLowerCase() === target) {
+  const target =
+    wanted.toLowerCase();
+
+
+  for (
+    const [key, value]
+    of Object.entries(obj)
+  ) {
+    if (
+      key.toLowerCase() ===
+      target
+    ) {
       return value;
     }
   }
+
 
   return null;
 }
@@ -108,97 +238,119 @@ function valueByName(obj, wanted) {
 
 function getAggregateId(movie) {
   return (
-    valueByName(movie, "aggregateformatnumber") ||
-    valueByName(movie, "aggregateMovieId") ||
-    valueByName(movie, "aggregateMovieID") ||
+    valueByName(
+      movie,
+      "aggregateformatnumber"
+    ) ||
+
+    valueByName(
+      movie,
+      "aggregateMovieId"
+    ) ||
+
+    valueByName(
+      movie,
+      "aggregateMovieID"
+    ) ||
+
     null
   );
 }
+
 
 function getTitle(movie) {
   return (
-    valueByName(movie, "title") ||
-    valueByName(movie, "name") ||
-    valueByName(movie, "originalTitle") ||
+    valueByName(
+      movie,
+      "title"
+    ) ||
+
+    valueByName(
+      movie,
+      "name"
+    ) ||
+
+    valueByName(
+      movie,
+      "originalTitle"
+    ) ||
+
     null
   );
 }
 
 
-export async function onRequestGet(context) {
+// ============================================================
+// NOS PIPELINE
+// ============================================================
+
+async function runNosDiagnostic() {
+
   /*
-   * -----------------------------------------
-   * STEP 1 — GET MOVIE CATALOGUE
-   * -----------------------------------------
+   * --------------------------------------------------------
+   * STEP 1 — MOVIE CATALOGUE
+   * --------------------------------------------------------
    */
 
-  let catalogue;
-
-  try {
-    catalogue = await getJson(MOVIES_URL);
-  } catch (error) {
-    return respond({
-      ok: false,
-      stage: "catalogue_fetch_exception",
-      error: String(error),
-    }, 500);
-  }
-
-
-  if (!catalogue.ok) {
-    return respond({
-      ok: false,
-      stage: "catalogue_http",
-      status: catalogue.status,
-      preview: catalogue.preview,
-    }, 500);
-  }
-
-
-  if (!catalogue.data) {
-    return respond({
-      ok: false,
-      stage: "catalogue_json",
-      preview: catalogue.preview,
-    }, 500);
-  }
+  const catalogue =
+    await getJson(
+      MOVIES_URL
+    );
 
 
   /*
-   * -----------------------------------------
-   * STEP 2 — LOCATE MOVIES
-   * -----------------------------------------
+   * --------------------------------------------------------
+   * STEP 2 — LOCATE MOVIE ARRAY
+   * --------------------------------------------------------
    */
 
-  const movies = findMovies(catalogue.data);
+  const movies =
+    findMovies(
+      catalogue.data
+    );
 
 
   if (!movies) {
-    return respond({
-      ok: false,
+    throw providerError(
+      "NOS movie array was not found",
+      {
+        stage:
+          "catalogue_schema",
 
-      stage: "movie_array_not_found",
+        details: {
+          data_fields:
+            Object.keys(
+              catalogue.data ||
+              {}
+            ),
 
-      data_fields:
-        Object.keys(catalogue.data || {}),
+          inner_data_fields:
+            Object.keys(
+              catalogue.data
+                ?.data ||
+              {}
+            )
+        }
+      }
+    );
+  }
 
-      inner_data_fields:
-        Object.keys(
-          catalogue.data?.data || {}
-        ),
 
-      preview:
-        JSON.stringify(
-          catalogue.data
-        ).slice(0, 3000),
-    }, 500);
+  if (movies.length === 0) {
+    throw providerError(
+      "NOS returned an empty movie catalogue",
+      {
+        stage:
+          "catalogue_empty"
+      }
+    );
   }
 
 
   /*
-   * -----------------------------------------
-   * STEP 3 — FIND FIRST USABLE MOVIE
-   * -----------------------------------------
+   * --------------------------------------------------------
+   * STEP 3 — FIND FIRST MOVIE WITH AGGREGATE ID
+   * --------------------------------------------------------
    */
 
   let selected = null;
@@ -206,122 +358,134 @@ export async function onRequestGet(context) {
 
 
   for (const movie of movies) {
-    const id = getAggregateId(movie);
+    const id =
+      getAggregateId(movie);
 
     if (id) {
-      selected = movie;
-      aggregateId = id;
+      selected =
+        movie;
+
+      aggregateId =
+        id;
+
       break;
     }
   }
 
 
   if (!selected) {
-    return respond({
-      ok: false,
+    throw providerError(
+      "NOS movie aggregate ID was not found",
+      {
+        stage:
+          "aggregate_id",
 
-      stage: "aggregate_id_not_found",
+        details: {
+          movie_count:
+            movies.length,
 
-      movie_count: movies.length,
+          first_movie_fields:
+            Object.keys(
+              movies[0] ||
+              {}
+            ),
 
-      first_movie_fields:
-        Object.keys(
-          movies[0] || {}
-        ),
-
-      first_movie:
-        movies[0] || null,
-    }, 500);
+          first_movie:
+            movies[0] ||
+            null
+        }
+      }
+    );
   }
 
 
   /*
-   * -----------------------------------------
+   * --------------------------------------------------------
    * STEP 4 — FETCH SESSIONS
-   * -----------------------------------------
+   * --------------------------------------------------------
    */
 
   const sessionsUrl =
     SESSIONS_BASE +
     "?aggregateMovieId=" +
-    encodeURIComponent(aggregateId);
+    encodeURIComponent(
+      aggregateId
+    );
 
 
-  let sessionResult;
-
-
-  try {
-    sessionResult =
-      await getJson(sessionsUrl);
-  } catch (error) {
-    return respond({
-      ok: false,
-
-      stage: "sessions_fetch_exception",
-
-      movie: getTitle(selected),
-
-      aggregate_movie_id:
-        aggregateId,
-
-      error: String(error),
-    }, 500);
-  }
-
-
-  if (!sessionResult.ok) {
-    return respond({
-      ok: false,
-
-      stage: "sessions_http",
-
-      movie: getTitle(selected),
-
-      aggregate_movie_id:
-        aggregateId,
-
-      status:
-        sessionResult.status,
-
-      preview:
-        sessionResult.preview,
-    }, 500);
-  }
-
-
-  if (!sessionResult.data) {
-    return respond({
-      ok: false,
-
-      stage: "sessions_json",
-
-      movie: getTitle(selected),
-
-      aggregate_movie_id:
-        aggregateId,
-
-      preview:
-        sessionResult.preview,
-    }, 500);
-  }
+  const sessionResult =
+    await getJson(
+      sessionsUrl
+    );
 
 
   /*
-   * -----------------------------------------
-   * STEP 5 — READ KNOWN NOS SESSION STRUCTURE
-   * -----------------------------------------
+   * --------------------------------------------------------
+   * STEP 5 — READ SESSION STRUCTURE
+   * --------------------------------------------------------
    */
 
+  if (
+    !Array.isArray(
+      sessionResult.data?.days
+    )
+  ) {
+    throw providerError(
+      "NOS sessions response does not contain a days array",
+      {
+        stage:
+          "sessions_schema",
+
+        details: {
+          movie:
+            getTitle(
+              selected
+            ),
+
+          aggregate_movie_id:
+            aggregateId,
+
+          session_fields:
+            Object.keys(
+              sessionResult.data ||
+              {}
+            )
+        }
+      }
+    );
+  }
+
+
   const days =
-    Array.isArray(sessionResult.data?.days)
-      ? sessionResult.data.days
-      : [];
+    sessionResult.data.days;
+
+
+  if (days.length === 0) {
+    throw providerError(
+      "NOS returned no session days for the selected movie",
+      {
+        stage:
+          "sessions_empty",
+
+        details: {
+          movie:
+            getTitle(
+              selected
+            ),
+
+          aggregate_movie_id:
+            aggregateId
+        }
+      }
+    );
+  }
 
 
   let theaterAppearances = 0;
   let sessionCount = 0;
 
-  const theaters = new Map();
+  const theaters =
+    new Map();
 
   const samples = [];
 
@@ -329,7 +493,9 @@ export async function onRequestGet(context) {
   for (const day of days) {
 
     const dayTheaters =
-      Array.isArray(day?.theaters)
+      Array.isArray(
+        day?.theaters
+      )
         ? day.theaters
         : [];
 
@@ -338,7 +504,10 @@ export async function onRequestGet(context) {
       dayTheaters.length;
 
 
-    for (const theater of dayTheaters) {
+    for (
+      const theater
+      of dayTheaters
+    ) {
 
       const theaterId =
         theater?.theaterId ||
@@ -346,77 +515,116 @@ export async function onRequestGet(context) {
         theater?.name;
 
 
-      if (!theaters.has(theaterId)) {
-        theaters.set(theaterId, {
-          name:
-            theater?.name || null,
+      if (!theaterId) {
+        continue;
+      }
 
-          theater_id:
-            theater?.theaterId ||
-            theater?.theaterID ||
-            null,
 
-          region_id:
-            theater?.regionId ||
-            theater?.regionID ||
-            null,
+      if (
+        !theaters.has(
+          theaterId
+        )
+      ) {
+        theaters.set(
+          theaterId,
+          {
+            name:
+              theater?.name ||
+              null,
 
-          location:
-            theater?.location ||
-            null,
-        });
+            theater_id:
+              theater
+                ?.theaterId ||
+              theater
+                ?.theaterID ||
+              null,
+
+            region_id:
+              theater
+                ?.regionId ||
+              theater
+                ?.regionID ||
+              null,
+
+            location:
+              theater
+                ?.location ||
+              null
+          }
+        );
       }
 
 
       const sessions =
-        Array.isArray(theater?.sessions)
+        Array.isArray(
+          theater?.sessions
+        )
           ? theater.sessions
           : [];
 
 
-      sessionCount += sessions.length;
+      sessionCount +=
+        sessions.length;
 
 
-      for (const session of sessions) {
+      for (
+        const session
+        of sessions
+      ) {
 
-        if (samples.length >= 20) {
+        if (
+          samples.length >=
+          20
+        ) {
           continue;
         }
 
+
         samples.push({
           day:
-            day?.name || null,
+            day?.name ||
+            null,
 
           theater:
-            theater?.name || null,
+            theater?.name ||
+            null,
 
           theater_id:
-            theater?.theaterId ||
-            theater?.theaterID ||
+            theater
+              ?.theaterId ||
+            theater
+              ?.theaterID ||
             null,
 
           session_uuid:
-            session?.uuid || null,
+            session?.uuid ||
+            null,
 
           time:
-            session?.time || null,
+            session?.time ||
+            null,
 
           operational_date:
-            session?.operationalDate ||
+            session
+              ?.operationalDate ||
             null,
 
           type:
-            session?.type || null,
+            session?.type ||
+            null,
 
           description:
-            session?.description ||
+            session
+              ?.description ||
             null,
 
           format:
-            session?.format || null,
+            session?.format ||
+            null,
 
           version:
-            session?.version || null,
+            session?.version ||
+            null
         });
       }
     }
@@ -424,19 +632,50 @@ export async function onRequestGet(context) {
 
 
   /*
-   * -----------------------------------------
-   * SUCCESS
-   * -----------------------------------------
+   * A valid-looking response with zero sessions should
+   * still be considered a failure for this diagnostic.
+   *
+   * Otherwise a NOS schema/content problem could be
+   * mistaken for a healthy provider.
    */
 
-  return respond({
-    ok: true,
+  if (sessionCount === 0) {
+    throw providerError(
+      "NOS returned zero sessions for the selected movie",
+      {
+        stage:
+          "session_count_zero",
 
+        details: {
+          movie:
+            getTitle(
+              selected
+            ),
+
+          aggregate_movie_id:
+            aggregateId,
+
+          days:
+            days.length,
+
+          theater_appearances:
+            theaterAppearances
+        }
+      }
+    );
+  }
+
+
+  /*
+   * --------------------------------------------------------
+   * SUCCESS RESULT
+   * --------------------------------------------------------
+   */
+
+  return {
     fetched_at:
-      new Date().toISOString(),
-
-    test:
-      "NOS automatic catalogue-to-sessions pipeline",
+      new Date()
+        .toISOString(),
 
     writes_to_d1:
       false,
@@ -446,12 +685,14 @@ export async function onRequestGet(context) {
         catalogue.status,
 
       movie_count:
-        movies.length,
+        movies.length
     },
 
     selected_movie: {
       title:
-        getTitle(selected),
+        getTitle(
+          selected
+        ),
 
       uuid:
         valueByName(
@@ -463,7 +704,9 @@ export async function onRequestGet(context) {
         aggregateId,
 
       fields:
-        Object.keys(selected),
+        Object.keys(
+          selected
+        )
     },
 
     sessions_request: {
@@ -471,7 +714,7 @@ export async function onRequestGet(context) {
         sessionResult.status,
 
       url:
-        sessionsUrl,
+        sessionsUrl
     },
 
     result: {
@@ -485,7 +728,7 @@ export async function onRequestGet(context) {
         theaterAppearances,
 
       sessions:
-        sessionCount,
+        sessionCount
     },
 
     theaters:
@@ -498,18 +741,278 @@ export async function onRequestGet(context) {
 
     raw_session_fields:
       Object.keys(
-        sessionResult.data || {}
-      ),
+        sessionResult.data ||
+        {}
+      )
+  };
+}
 
-    success:
-      (
-        movies.length > 0 &&
-        Boolean(aggregateId) &&
-        days.length > 0 &&
-        sessionCount > 0
-      ),
+
+// ============================================================
+// REQUEST HANDLER
+// ============================================================
+
+export async function onRequestGet(
+  context
+) {
+  const db =
+    context.env.DB;
+
+
+  /*
+   * safeRun handles:
+   *
+   *   provider attempt
+   *   success
+   *   failure
+   *   duplicate errors
+   *   recovery
+   *   provider health
+   */
+
+  let result;
+
+
+  try {
+    result =
+      await safeRun({
+        db,
+
+        provider:
+          "cinemas_nos",
+
+        operation:
+          "catalogue_to_sessions_diagnostic",
+
+        sourceFile:
+          "functions/api/nos-test.js",
+
+        request:
+          context.request,
+
+        reproduction: {
+          endpoint:
+            "/api/nos-test",
+
+          method:
+            "GET"
+        },
+
+        context: {
+          diagnostic:
+            true,
+
+          writes_to_content_tables:
+            false,
+
+          movie_catalogue_url:
+            MOVIES_URL
+        },
+
+        run:
+          runNosDiagnostic,
+
+        /*
+         * This is a second safety check after the
+         * provider-specific validation above.
+         */
+
+        validate: data => {
+          if (
+            !data ||
+            !data.result
+          ) {
+            throw new Error(
+              "NOS diagnostic result is missing"
+            );
+          }
+
+
+          if (
+            !Number.isFinite(
+              data.result.sessions
+            ) ||
+            data.result.sessions <= 0
+          ) {
+            throw new Error(
+              "NOS diagnostic produced no usable sessions"
+            );
+          }
+
+
+          return true;
+        },
+
+        getItemCount:
+          data =>
+            data?.result
+              ?.sessions ??
+            null,
+
+        getMetadata:
+          data => ({
+            movie_count:
+              data?.catalogue
+                ?.movie_count ??
+              null,
+
+            selected_movie:
+              data
+                ?.selected_movie
+                ?.title ??
+              null,
+
+            days:
+              data?.result
+                ?.days ??
+              null,
+
+            unique_theaters:
+              data?.result
+                ?.unique_theaters ??
+              null,
+
+            sessions:
+              data?.result
+                ?.sessions ??
+              null
+          }),
+
+        fallbackData: {
+          fetched_at:
+            new Date()
+              .toISOString(),
+
+          writes_to_d1:
+            false,
+
+          result: {
+            days: 0,
+            unique_theaters: 0,
+            theater_appearances: 0,
+            sessions: 0
+          },
+
+          theaters: [],
+
+          session_sample: []
+        }
+      });
+
+
+  } catch (frameworkError) {
+
+    /*
+     * safeRun itself failed.
+     *
+     * This is different from NOS failing.
+     */
+
+    return respond(
+      {
+        ok: false,
+
+        graceful_failure:
+          false,
+
+        stage:
+          "reliability_framework_failure",
+
+        message:
+          frameworkError
+            ?.message ||
+          String(
+            frameworkError
+          ),
+
+        stack:
+          frameworkError
+            ?.stack ||
+          null
+      },
+      500
+    );
+  }
+
+
+  /*
+   * --------------------------------------------------------
+   * GRACEFUL NOS FAILURE
+   * --------------------------------------------------------
+   *
+   * Deliberately return HTTP 200 from this diagnostic
+   * endpoint even when NOS failed.
+   *
+   * The JSON tells us the provider failed; Cloudflare
+   * does not replace the useful diagnostic with a
+   * generic gateway-error page.
+   */
+
+  if (!result.ok) {
+    return respond({
+      ok: false,
+
+      graceful_failure:
+        true,
+
+      provider:
+        result.provider,
+
+      operation:
+        result.operation,
+
+      duration_ms:
+        result.durationMs,
+
+      error:
+        result.error,
+
+      fallback:
+        result.data,
+
+      message:
+        "The NOS diagnostic failed, but PTLife handled the failure without crashing.",
+
+      next_step:
+        "Inspect system_errors and provider_health using the returned error ID."
+    });
+  }
+
+
+  /*
+   * --------------------------------------------------------
+   * SUCCESS
+   * --------------------------------------------------------
+   */
+
+  return respond({
+    ok: true,
+
+    graceful_success:
+      true,
+
+    provider:
+      result.provider,
+
+    operation:
+      result.operation,
+
+    duration_ms:
+      result.durationMs,
+
+    session_count:
+      result.itemCount,
+
+    recovered:
+      result.recovered,
+
+    recovery:
+      result.recovery,
+
+    data:
+      result.data,
 
     next_step:
-      "If success is true, back-test Colombo and Algarve before building the NOS production adapter.",
+      "Back-test specific NOS cinemas in Lisbon, Porto and Algarve before building the production importer."
   });
 }
