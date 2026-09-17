@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ptlife",
+  "compatibility_date": "2026-09-17",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ptlife",
+      "database_id": "c67f4b63-a1d5-42e0-ba0e-be4bdf241cf6",
+      "migrations_dir": "database/migrations"
+    }
+  ]
+}
