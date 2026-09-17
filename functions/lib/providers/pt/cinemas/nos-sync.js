@@ -159,9 +159,9 @@ export async function syncNos({
       ?.incoming;
 
 
-  const occurrencePrograms =
-    occurrences?.totals
-      ?.programs;
+    const occurrencePrograms =
+      occurrences?.totals
+        ?.programs_processed;
 
 
   if (
