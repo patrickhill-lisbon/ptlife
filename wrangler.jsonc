@@ -1,13 +1,18 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ptlife",
-  "compatibility_date": "2026-09-17",
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "ptlife",
-      "database_id": "c67f4b63-a1d5-42e0-ba0e-be4bdf241cf6",
-      "migrations_dir": "database/migrations"
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ptlife",
+	"compatibility_date": "2026-09-17",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ptlife",
+			"database_id": "c67f4b63-a1d5-42e0-ba0e-be4bdf241cf6",
+			"migrations_dir": "database/migrations"
+		},
+		{
+			"binding": "ptlife_test",
+			"database_name": "ptlife-test",
+			"database_id": "9fc8cbea-a876-4f66-a792-f1671e719cfb"
+		}
+	]
 }
