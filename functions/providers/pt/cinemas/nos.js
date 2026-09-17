@@ -529,10 +529,29 @@ export async function fetchSessions(
     );
 
 
-  const fetched =
-    await fetchProviderJson(
-      url
-    );
+  let fetched;
+
+  try {
+    fetched =
+      await fetchProviderJson(
+        url
+      );
+  } catch (error) {
+    error.providerKey =
+      provider.key;
+
+    error.aggregateMovieId =
+      aggregateMovieId;
+
+    error.providerUrl =
+      url;
+
+    error.message =
+      `NOS session fetch failed for aggregateMovieId ${aggregateMovieId}: ` +
+      error.message;
+
+    throw error;
+  }
 
 
   return {
@@ -553,7 +572,6 @@ export async function fetchSessions(
     }
   };
 }
-
 
 /*
  * Normalize NOS session data without knowing anything
