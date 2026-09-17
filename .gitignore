@@ -1,2 +1,6 @@
 # Local Cloudflare Wrangler files
 .wrangler/
+
+# macOS
+.DS_Store
+**/.DS_Store
