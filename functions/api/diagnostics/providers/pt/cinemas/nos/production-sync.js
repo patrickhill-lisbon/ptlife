@@ -105,7 +105,7 @@ export async function onRequestGet(
           const occurrencePrograms =
             data?.occurrences
               ?.totals
-              ?.programs;
+              ?.programs_processed;
 
 
           const normalizedOccurrences =
