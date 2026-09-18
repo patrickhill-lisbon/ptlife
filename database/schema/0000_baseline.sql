@@ -139,6 +139,11 @@ CREATE TABLE sources ( id INTEGER PRIMARY KEY AUTOINCREMENT, place_id INTEGER, s
 -- system_errors
 CREATE TABLE system_errors ( id INTEGER PRIMARY KEY AUTOINCREMENT, error_id TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL, provider TEXT, operation TEXT, stage TEXT, severity TEXT NOT NULL DEFAULT 'error', error_name TEXT, error_message TEXT NOT NULL, stack_trace TEXT, source_file TEXT, source_line INTEGER, source_column INTEGER, request_method TEXT, request_url TEXT, http_status INTEGER, reproduction_json TEXT, context_json TEXT, first_occurred_at TEXT NOT NULL, last_occurred_at TEXT NOT NULL, occurrence_count INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'open', resolved_at TEXT, first_notification_at TEXT, last_notification_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
 
+-- scheduled_jobs
+CREATE TABLE scheduled_jobs ( id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL UNIQUE, job_type TEXT NOT NULL, scope_type TEXT NOT NULL DEFAULT 'global' CHECK ( scope_type IN ( 'global', 'country', 'region', 'locality', 'place', 'source' ) ), scope_id TEXT, frequency_minutes INTEGER NOT NULL CHECK (frequency_minutes > 0), enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)), next_run_at TEXT, last_attempt_at TEXT, last_success_at TEXT, last_failure_at TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0), config_json TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
+
+CREATE TABLE job_runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, scheduled_job_id INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, status TEXT NOT NULL CHECK ( status IN ( 'running', 'success', 'failed', 'skipped' ) ), duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0), item_count INTEGER CHECK (item_count IS NULL OR item_count >= 0), error_id TEXT, metadata_json TEXT, FOREIGN KEY (scheduled_job_id) REFERENCES scheduled_jobs(id) ON DELETE CASCADE );
+
 -- tags
 CREATE TABLE tags ( id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, name_english TEXT NOT NULL, name_portuguese TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
 
@@ -283,6 +288,12 @@ CREATE INDEX idx_programs_status ON programs(status);
 
 -- idx_programs_type
 CREATE INDEX idx_programs_type ON programs(program_type);
+
+-- idx_scheduled_jobs_due
+CREATE INDEX idx_scheduled_jobs_due ON scheduled_jobs(enabled, next_run_at);
+
+-- idx_job_runs_job_started
+CREATE INDEX idx_job_runs_job_started ON job_runs(scheduled_job_id, started_at);
 
 -- idx_provider_health_last_failure
 CREATE INDEX idx_provider_health_last_failure ON provider_health(last_failure_at DESC);
